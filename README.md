@@ -19,6 +19,8 @@ static analyzer.
   one or more matching locale dictionaries.
 - Underlines unused leaf keys in `public/<locale>/<namespace>.json` files when
   no `.tsx` file uses that namespace/key.
+- Offers a Quick Fix for unused JSON keys that deletes the key from every
+  existing locale dictionary for that namespace.
 - Auto-discovers `public` folders anywhere in the workspace, including nested
   folders such as `frontend/public`.
 - Lets you configure additional dictionary public paths.
@@ -131,6 +133,28 @@ with the same namespace, the JSON key is underlined with a warning such as:
 ```text
 Translation key "hero.subtitle" is not used by any TSX file with namespace "landing".
 ```
+
+The warning includes a Quick Fix:
+
+```text
+Delete "hero.subtitle" from all landing.json dictionaries
+```
+
+Applying it removes that key from every existing
+`public/<locale>/landing.json` file where the key is present.
+
+When several unused keys are reported for the same namespace, related bulk
+Quick Fixes are also available:
+
+```text
+Delete all "hero.*" from all landing.json dictionaries
+Delete all unused attributes from all landing.json dictionaries
+```
+
+Batch fixes are validated before they are offered, so removing final sibling
+keys will also remove the preceding comma instead of leaving trailing commas.
+If every leaf key under a parent object is removed, the parent object is removed
+too instead of leaving an empty object behind.
 
 ## Commands
 

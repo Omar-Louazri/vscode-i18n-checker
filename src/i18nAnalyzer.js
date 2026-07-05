@@ -66,16 +66,16 @@ const SUPPORTED_LANGUAGES = Object.freeze({
 });
 const SUPPORTED_LANGUAGE_CODES = new Set(Object.keys(SUPPORTED_LANGUAGES));
 
-function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments, dictionaryPublicPaths }) {
+function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments, dictionaryPublicPaths, cache }) {
   const diagnostics = [];
   const contexts = findTranslationContexts(text);
 
   for (const context of contexts) {
-    const dictionaries = readDictionaries(workspaceRoot, context.namespace, openDocuments, dictionaryPublicPaths);
+    const dictionaries = readDictionaries(workspaceRoot, context.namespace, openDocuments, dictionaryPublicPaths, cache);
     const existingDictionaries = dictionaries.files.filter((file) => file.exists);
     const namespaceTarget = existingDictionaries.length
       ? existingDictionaries.map((file) => path.relative(workspaceRoot, file.filePath)).join(", ")
-      : getNamespaceTarget(workspaceRoot, context.namespace, dictionaryPublicPaths);
+      : getNamespaceTarget(workspaceRoot, context.namespace, dictionaryPublicPaths, cache);
 
     for (const usage of findTranslationCallsForContext(text, context)) {
       if (!existingDictionaries.length) {
@@ -113,8 +113,8 @@ function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments, dict
   return diagnostics;
 }
 
-function analyzeJsonDocument({ text, filePath, workspaceRoot, openDocuments, dictionaryPublicPaths }) {
-  const info = getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths);
+function analyzeJsonDocument({ text, filePath, workspaceRoot, openDocuments, dictionaryPublicPaths, cache }) {
+  const info = getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths, cache);
 
   if (!info) {
     return [];
@@ -133,7 +133,7 @@ function analyzeJsonDocument({ text, filePath, workspaceRoot, openDocuments, dic
     ];
   }
 
-  const usedKeys = findWorkspaceTranslationKeys(workspaceRoot, info.namespace, openDocuments);
+  const usedKeys = findWorkspaceTranslationKeys(workspaceRoot, info.namespace, openDocuments, cache);
 
   return parsed.keys
     .filter((key) => !usedKeys.has(key.path))
@@ -142,10 +142,15 @@ function analyzeJsonDocument({ text, filePath, workspaceRoot, openDocuments, dic
       end: key.keyEnd,
       message: `Translation key "${key.path}" is not used by any TSX file with namespace "${info.namespace}".`,
       severity: "warning",
+      code: "unusedTranslationKey",
+      data: {
+        keyPath: key.path,
+        namespace: info.namespace,
+      },
     }));
 }
 
-function inspectDocument({ text, filePath, workspaceRoot, openDocuments, dictionaryPublicPaths }) {
+function inspectDocument({ text, filePath, workspaceRoot, openDocuments, dictionaryPublicPaths, cache }) {
   if (path.extname(filePath) === ".tsx") {
     const contexts = findTranslationContexts(text);
 
@@ -155,7 +160,7 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments, diction
       contexts: contexts.map((context) => ({
         namespace: context.namespace,
         tName: context.tName,
-        dictionaries: readDictionaries(workspaceRoot, context.namespace, openDocuments, dictionaryPublicPaths).files.map((file) => ({
+        dictionaries: readDictionaries(workspaceRoot, context.namespace, openDocuments, dictionaryPublicPaths, cache).files.map((file) => ({
           locale: file.locale,
           language: getSupportedLanguageName(file.locale),
           exists: file.exists,
@@ -168,7 +173,7 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments, diction
   }
 
   if (path.extname(filePath) === ".json") {
-    const info = getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths);
+    const info = getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths, cache);
     const parsed = parseJsonWithLocations(text);
 
     return {
@@ -180,7 +185,7 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments, diction
       keyCount: parsed.keys.length,
       keys: parsed.keys.map((key) => key.path),
       parseError: parsed.error?.message ?? null,
-      usedKeys: info ? [...findWorkspaceTranslationKeys(workspaceRoot, info.namespace, openDocuments)].sort() : [],
+      usedKeys: info ? [...findWorkspaceTranslationKeys(workspaceRoot, info.namespace, openDocuments, cache)].sort() : [],
     };
   }
 
@@ -248,6 +253,243 @@ function findJsonKeyLocation(text, targetPath) {
   }
 
   return parsed.keyLocations.find((key) => key.path === targetPath) ?? null;
+}
+
+function findJsonKeyDeletionRange(text, targetPath) {
+  return findJsonKeyDeletionRanges(text, [targetPath])[0] ?? null;
+}
+
+function findJsonKeyDeletionRanges(text, targetPaths) {
+  const parsed = parseJsonWithLocations(text);
+
+  if (parsed.error) {
+    return [];
+  }
+
+  const removalPlan = createJsonKeyRemovalPlan(parsed.keyLocations, new Set(targetPaths));
+  const ranges = [];
+
+  for (const siblings of removalPlan.siblingGroups.values()) {
+    const targetSiblings = siblings.filter((key) => removalPlan.targets.has(key));
+
+    if (!targetSiblings.length) {
+      continue;
+    }
+
+    ranges.push(...createSiblingRemovalRanges(text, siblings, targetSiblings));
+  }
+
+  const mergedRanges = mergeTextRanges(ranges);
+
+  return isValidJsonAfterRemovingRanges(text, mergedRanges) ? mergedRanges : [];
+}
+
+function createJsonKeyRemovalPlan(keyLocations, targetPathSet) {
+  const descendantLeavesByPath = indexDescendantLeavesByPath(keyLocations);
+  const targets = new Set(keyLocations.filter((keyLocation) => targetPathSet.has(keyLocation.path)));
+
+  for (const keyLocation of keyLocations) {
+    if (keyLocation.isLeaf) {
+      continue;
+    }
+
+    const descendantLeaves = descendantLeavesByPath.get(keyLocation.path) ?? [];
+
+    if (!descendantLeaves.length) {
+      continue;
+    }
+
+    if (descendantLeaves.every((descendant) => targetPathSet.has(descendant.path))) {
+      targets.add(keyLocation);
+    }
+  }
+
+  return {
+    targets: keepTopLevelRemovalTargets(targets),
+    siblingGroups: groupKeyLocationsByParent(keyLocations),
+  };
+}
+
+function indexDescendantLeavesByPath(keyLocations) {
+  const descendantLeavesByPath = new Map();
+
+  for (const keyLocation of keyLocations) {
+    if (!keyLocation.isLeaf) {
+      continue;
+    }
+
+    const parts = keyLocation.path.split(".");
+
+    for (let index = 1; index < parts.length; index += 1) {
+      const ancestorPath = parts.slice(0, index).join(".");
+      const descendants = descendantLeavesByPath.get(ancestorPath) ?? [];
+      descendants.push(keyLocation);
+      descendantLeavesByPath.set(ancestorPath, descendants);
+    }
+  }
+
+  return descendantLeavesByPath;
+}
+
+function keepTopLevelRemovalTargets(removalTargets) {
+  const targets = [...removalTargets];
+  return new Set(
+    targets.filter(
+      (target) =>
+        !targets.some(
+          (candidate) =>
+            candidate !== target &&
+            target.path.startsWith(`${candidate.path}.`),
+        ),
+    ),
+  );
+}
+
+function groupKeyLocationsByParent(keyLocations) {
+  const groups = new Map();
+
+  for (const keyLocation of keyLocations) {
+    const siblings = groups.get(keyLocation.parentPath) ?? [];
+    siblings.push(keyLocation);
+    groups.set(keyLocation.parentPath, siblings);
+  }
+
+  return groups;
+}
+
+function createSiblingRemovalRanges(text, siblings, targetSiblings) {
+  const ranges = [];
+  const targetSiblingSet = new Set(targetSiblings);
+
+  for (const target of targetSiblings) {
+    if (target.commaStart !== null) {
+      ranges.push({
+        start: findLeadingWhitespaceStart(text, target.propertyStart),
+        end: includeFollowingLineWhitespace(text, target.commaStart + 1),
+      });
+      continue;
+    }
+
+    const previousKept = findPreviousKeptSibling(siblings, target, targetSiblingSet);
+
+    if (previousKept?.commaStart !== null && previousKept?.commaStart !== undefined) {
+      ranges.push({
+        start: previousKept.commaStart,
+        end: target.propertyEnd,
+      });
+      continue;
+    }
+
+    ranges.push({
+      start: findLeadingWhitespaceStart(text, target.propertyStart),
+      end: includeFollowingLineWhitespace(text, target.propertyEnd),
+    });
+  }
+
+  return ranges;
+}
+
+function findPreviousKeptSibling(siblings, target, targetSiblingSet) {
+  let previousKept = null;
+
+  for (const sibling of siblings) {
+    if (sibling === target) {
+      return previousKept;
+    }
+
+    if (!targetSiblingSet.has(sibling)) {
+      previousKept = sibling;
+    }
+  }
+
+  return null;
+}
+
+function findUnusedTranslationKeyRemovalEdits({
+  workspaceRoot,
+  namespace,
+  keyPath,
+  openDocuments,
+  dictionaryPublicPaths,
+  cache,
+}) {
+  return findUnusedTranslationKeysRemovalEdits({
+    workspaceRoot,
+    namespace,
+    keyPaths: [keyPath],
+    openDocuments,
+    dictionaryPublicPaths,
+    cache,
+  });
+}
+
+function findUnusedTranslationKeysRemovalEdits({
+  workspaceRoot,
+  namespace,
+  keyPaths,
+  openDocuments,
+  dictionaryPublicPaths,
+  cache,
+}) {
+  const edits = [];
+  const targetPaths = [...new Set(keyPaths)].filter(Boolean);
+
+  if (!targetPaths.length) {
+    return edits;
+  }
+
+  for (const dictionary of findDictionaryTargets(workspaceRoot, namespace, dictionaryPublicPaths, cache)) {
+    if (!dictionary.exists) {
+      continue;
+    }
+
+    const text = readTextFile(dictionary.filePath, openDocuments);
+    const ranges = findJsonKeyDeletionRanges(text, targetPaths);
+
+    edits.push(
+      ...ranges.map((range) => ({
+        filePath: dictionary.filePath,
+        start: range.start,
+        end: range.end,
+        startPosition: offsetToLineCharacter(text, range.start),
+        endPosition: offsetToLineCharacter(text, range.end),
+      })),
+    );
+  }
+
+  return edits;
+}
+
+function mergeTextRanges(ranges) {
+  const sortedRanges = [...ranges].sort((left, right) => left.start - right.start || left.end - right.end);
+  const mergedRanges = [];
+
+  for (const range of sortedRanges) {
+    const previous = mergedRanges[mergedRanges.length - 1];
+
+    if (previous && range.start <= previous.end) {
+      previous.end = Math.max(previous.end, range.end);
+      continue;
+    }
+
+    mergedRanges.push({ ...range });
+  }
+
+  return mergedRanges;
+}
+
+function isValidJsonAfterRemovingRanges(text, ranges) {
+  const nextText = applyTextRemovals(text, ranges);
+  return !parseJsonWithLocations(nextText).error;
+}
+
+function applyTextRemovals(text, ranges) {
+  return [...ranges]
+    .sort((left, right) => right.start - left.start)
+    .reduce(
+      (currentText, range) => `${currentText.slice(0, range.start)}${currentText.slice(range.end)}`,
+      text,
+    );
 }
 
 function findTranslationContexts(text) {
@@ -773,49 +1015,111 @@ function skipWhitespaceAndCommasAt(text, offset) {
   return index;
 }
 
+function findLeadingWhitespaceStart(text, offset) {
+  const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+  const prefix = text.slice(lineStart, offset);
+
+  return /^[ \t]*$/.test(prefix) ? lineStart : offset;
+}
+
+function includeFollowingLineWhitespace(text, offset) {
+  let index = offset;
+
+  while (text[index] === " " || text[index] === "\t") {
+    index += 1;
+  }
+
+  if (text[index] === "\r" && text[index + 1] === "\n") {
+    return index + 2;
+  }
+
+  if (text[index] === "\n") {
+    return index + 1;
+  }
+
+  return index;
+}
+
+function offsetToLineCharacter(text, offset) {
+  let line = 0;
+  let character = 0;
+  const end = Math.max(0, Math.min(offset, text.length));
+
+  for (let index = 0; index < end; index += 1) {
+    if (text[index] === "\n") {
+      line += 1;
+      character = 0;
+    } else {
+      character += 1;
+    }
+  }
+
+  return { line, character };
+}
+
 function normalizeExpression(source) {
   return source.replace(/\s+/g, "");
 }
 
-function readDictionaries(workspaceRoot, namespace, openDocuments, dictionaryPublicPaths) {
-  const files = [];
-  const publicDirs = findPublicDirectories(workspaceRoot, dictionaryPublicPaths);
-
-  if (!publicDirs.length) {
-    return { files };
+function getCacheMap(cache, key) {
+  if (!cache) {
+    return null;
   }
 
-  for (const publicDir of publicDirs) {
-    for (const locale of safeReadDir(publicDir)) {
-      const localeDir = path.join(publicDir, locale);
-      const filePath = path.join(localeDir, `${namespace}.json`);
+  if (!cache[key]) {
+    cache[key] = new Map();
+  }
 
-      if (!isSupportedLanguageCode(locale) || !isDirectory(localeDir)) {
-        continue;
-      }
+  return cache[key];
+}
 
-      let keys = new Set();
+function readDictionaries(workspaceRoot, namespace, openDocuments, dictionaryPublicPaths, cache) {
+  const files = [];
 
-      if (fs.existsSync(filePath)) {
-        const text = readTextFile(filePath, openDocuments);
-        const parsed = parseJsonWithLocations(text);
-        keys = new Set(parsed.keys.map((key) => key.path));
-      }
+  for (const target of findDictionaryTargets(workspaceRoot, namespace, dictionaryPublicPaths, cache)) {
+    let keys = new Set();
 
-      files.push({
-        locale,
-        filePath,
-        exists: fs.existsSync(filePath),
-        keys,
-      });
+    if (target.exists) {
+      const text = readTextFile(target.filePath, openDocuments);
+      const parsed = parseJsonWithLocations(text);
+      keys = new Set(parsed.keys.map((key) => key.path));
     }
+
+    files.push({
+      ...target,
+      keys,
+    });
   }
 
   return { files };
 }
 
-function getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths) {
-  for (const publicDir of findPublicDirectories(workspaceRoot, dictionaryPublicPaths)) {
+function findDictionaryTargets(workspaceRoot, namespace, dictionaryPublicPaths, cache) {
+  const files = [];
+
+  for (const publicDir of findPublicDirectories(workspaceRoot, dictionaryPublicPaths, cache)) {
+    for (const locale of safeReadDir(publicDir)) {
+      const localeDir = path.join(publicDir, locale);
+
+      if (!isSupportedLanguageCode(locale) || !isDirectory(localeDir)) {
+        continue;
+      }
+
+      const filePath = path.join(localeDir, `${namespace}.json`);
+
+      files.push({
+        locale,
+        filePath,
+        exists: fs.existsSync(filePath),
+      });
+    }
+  }
+
+  return files;
+}
+
+function getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths, cache) {
+  for (const publicDir of findPublicDirectories(workspaceRoot, dictionaryPublicPaths, cache)) {
     const relativePath = path.relative(publicDir, filePath);
 
     if (!isRelativeChildPath(relativePath)) {
@@ -843,8 +1147,8 @@ function getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths) {
   return null;
 }
 
-function isLocaleJsonFile(filePath, workspaceRoot, dictionaryPublicPaths) {
-  return Boolean(getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths));
+function isLocaleJsonFile(filePath, workspaceRoot, dictionaryPublicPaths, cache) {
+  return Boolean(getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths, cache));
 }
 
 function findDictionaryFile(workspaceRoot, locale, namespace, dictionaryPublicPaths) {
@@ -871,8 +1175,8 @@ function isSupportedLanguageCode(locale) {
   return SUPPORTED_LANGUAGE_CODES.has(locale);
 }
 
-function getNamespaceTarget(workspaceRoot, namespace, dictionaryPublicPaths) {
-  const publicDirs = findPublicDirectories(workspaceRoot, dictionaryPublicPaths);
+function getNamespaceTarget(workspaceRoot, namespace, dictionaryPublicPaths, cache) {
+  const publicDirs = findPublicDirectories(workspaceRoot, dictionaryPublicPaths, cache);
 
   if (!publicDirs.length) {
     return `**/public/*/${namespace}.json`;
@@ -883,7 +1187,15 @@ function getNamespaceTarget(workspaceRoot, namespace, dictionaryPublicPaths) {
     .join(", ");
 }
 
-function findPublicDirectories(workspaceRoot, dictionaryPublicPaths) {
+function findPublicDirectories(workspaceRoot, dictionaryPublicPaths, cache) {
+  const cacheKey = `${workspaceRoot}\0${JSON.stringify(dictionaryPublicPaths ?? [])}`;
+  const publicDirectoriesCache = getCacheMap(cache, "publicDirectories");
+  const cachedPublicDirectories = publicDirectoriesCache?.get(cacheKey);
+
+  if (cachedPublicDirectories) {
+    return cachedPublicDirectories;
+  }
+
   const publicDirs = new Set();
 
   for (const configuredPath of dictionaryPublicPaths ?? []) {
@@ -898,7 +1210,9 @@ function findPublicDirectories(workspaceRoot, dictionaryPublicPaths) {
 
   walk(workspaceRoot);
 
-  return [...publicDirs];
+  const result = [...publicDirs];
+  publicDirectoriesCache?.set(cacheKey, result);
+  return result;
 
   function walk(directory) {
     for (const entry of safeReadDir(directory)) {
@@ -930,9 +1244,17 @@ function isRelativeChildPath(relativePath) {
   return relativePath !== "" && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
 }
 
-function findWorkspaceTranslationKeys(workspaceRoot, namespace, openDocuments) {
+function findWorkspaceTranslationKeys(workspaceRoot, namespace, openDocuments, cache) {
+  const cacheKey = `${workspaceRoot}\0${namespace}`;
+  const workspaceTranslationKeysCache = getCacheMap(cache, "workspaceTranslationKeys");
+  const cachedKeys = workspaceTranslationKeysCache?.get(cacheKey);
+
+  if (cachedKeys) {
+    return cachedKeys;
+  }
+
   const keys = new Set();
-  const filePaths = new Set(findFiles(workspaceRoot, TSX_EXTENSIONS));
+  const filePaths = new Set(findFiles(workspaceRoot, TSX_EXTENSIONS, cache));
 
   for (const filePath of openDocuments?.keys?.() ?? []) {
     if (isInsidePath(workspaceRoot, filePath) && TSX_EXTENSIONS.has(path.extname(filePath))) {
@@ -954,6 +1276,7 @@ function findWorkspaceTranslationKeys(workspaceRoot, namespace, openDocuments) {
     }
   }
 
+  workspaceTranslationKeysCache?.set(cacheKey, keys);
   return keys;
 }
 
@@ -965,10 +1288,19 @@ function readTextFile(filePath, openDocuments) {
   return fs.readFileSync(filePath, "utf8");
 }
 
-function findFiles(root, extensions) {
+function findFiles(root, extensions, cache) {
+  const cacheKey = `${root}\0${[...extensions].sort().join(",")}`;
+  const filesCache = getCacheMap(cache, "files");
+  const cachedFiles = filesCache?.get(cacheKey);
+
+  if (cachedFiles) {
+    return cachedFiles;
+  }
+
   const results = [];
 
   walk(root);
+  filesCache?.set(cacheKey, results);
   return results;
 
   function walk(directory) {
@@ -990,7 +1322,6 @@ function findFiles(root, extensions) {
 
 function parseJsonWithLocations(text) {
   let index = 0;
-  const keys = [];
   const keyLocations = [];
 
   try {
@@ -1001,10 +1332,13 @@ function parseJsonWithLocations(text) {
       throw error("Unexpected characters after JSON value.");
     }
 
-    return { keys, keyLocations };
+    return {
+      keys: getLeafKeys(),
+      keyLocations,
+    };
   } catch (parseError) {
     return {
-      keys,
+      keys: getLeafKeys(),
       keyLocations,
       error: {
         offset: Math.max(0, Math.min(index, text.length - 1)),
@@ -1055,20 +1389,24 @@ function parseJsonWithLocations(text) {
 
     while (index < text.length) {
       skipWhitespace();
+      const propertyStart = index;
       const key = parseString();
       const nextPathParts = [...pathParts, key.value];
-      recordKeyLocation(nextPathParts, key);
+      const keyLocation = recordKeyLocation(pathParts, nextPathParts, key, propertyStart);
       skipWhitespace();
       expect(":");
-      parseValue(nextPathParts, key);
+      parseValue(nextPathParts, keyLocation);
+      keyLocation.propertyEnd = index;
       skipWhitespace();
 
       if (text[index] === ",") {
+        keyLocation.commaStart = index;
         index += 1;
         continue;
       }
 
       if (text[index] === "}") {
+        keyLocation.commaStart = null;
         index += 1;
         return;
       }
@@ -1183,20 +1521,39 @@ function parseJsonWithLocations(text) {
     throw error("Expected JSON value.");
   }
 
-  function recordKey(pathParts, keyLocation) {
-    keys.push({
-      path: pathParts.join("."),
-      keyStart: keyLocation.keyStart,
-      keyEnd: keyLocation.keyEnd,
-    });
+  function recordKey(_pathParts, keyLocation) {
+    keyLocation.isLeaf = true;
   }
 
-  function recordKeyLocation(pathParts, keyLocation) {
-    keyLocations.push({
+  function recordKeyLocation(parentPathParts, pathParts, keyLocation, propertyStart) {
+    const location = {
       path: pathParts.join("."),
+      parentPath: parentPathParts.join("."),
       keyStart: keyLocation.keyStart,
       keyEnd: keyLocation.keyEnd,
-    });
+      propertyStart,
+      propertyEnd: keyLocation.keyEnd + 1,
+      commaStart: null,
+      isLeaf: false,
+    };
+
+    keyLocations.push(location);
+    return location;
+  }
+
+  function getLeafKeys() {
+    return keyLocations
+      .filter((key) => key.isLeaf)
+      .map((key) => ({
+        path: key.path,
+        keyStart: key.keyStart,
+        keyEnd: key.keyEnd,
+        propertyStart: key.propertyStart,
+        propertyEnd: key.propertyEnd,
+        commaStart: key.commaStart,
+        parentPath: key.parentPath,
+        isLeaf: key.isLeaf,
+      }));
   }
 
   function expect(char) {
@@ -1243,9 +1600,13 @@ module.exports = {
   analyzeTsxDocument,
   findDictionaryFile,
   findJsonKeyLocation,
+  findJsonKeyDeletionRange,
+  findJsonKeyDeletionRanges,
   findTranslationCalls,
   findTranslationContexts,
   findTranslationKeyAtOffset,
+  findUnusedTranslationKeyRemovalEdits,
+  findUnusedTranslationKeysRemovalEdits,
   getSupportedLanguageName,
   inspectDocument,
   isLocaleJsonFile,

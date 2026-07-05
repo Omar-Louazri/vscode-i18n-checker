@@ -8,6 +8,7 @@ const {
   findDictionaryFile,
   findJsonKeyLocation,
   findTranslationKeyAtOffset,
+  findUnusedTranslationKeysRemovalEdits,
   inspectDocument,
   isLocaleJsonFile,
 } = require("./i18nAnalyzer");
@@ -30,6 +31,11 @@ function activate(context) {
     vscode.languages.registerDefinitionProvider(
       [{ language: "typescriptreact", scheme: "file" }, { pattern: "**/*.tsx", scheme: "file" }],
       { provideDefinition },
+    ),
+    vscode.languages.registerCodeActionsProvider(
+      [{ language: "json", scheme: "file" }, { pattern: "**/public/*/*.json", scheme: "file" }],
+      { provideCodeActions },
+      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
     ),
     vscode.workspace.onDidOpenTextDocument(updateDocumentDiagnostics),
     vscode.workspace.onDidChangeTextDocument((event) => {
@@ -60,6 +66,154 @@ function activate(context) {
   refreshOpenDocuments();
 }
 
+function provideCodeActions(document, _range, context) {
+  if (!isJsonDocument(document)) {
+    return [];
+  }
+
+  const workspaceRoot = getWorkspaceRoot(document.uri);
+
+  if (!workspaceRoot) {
+    return [];
+  }
+
+  const actions = [];
+  const openDocuments = getOpenDocumentTexts();
+  const dictionaryPublicPaths = getDictionaryPublicPaths();
+  const analysisCache = {};
+  const selectedTargets = context.diagnostics
+    .filter(isUnusedTranslationKeyDiagnostic)
+    .map(getUnusedTranslationKeyTarget)
+    .filter(Boolean);
+  const allUnusedDiagnostics = (diagnostics.get(document.uri) ?? context.diagnostics).filter(
+    isUnusedTranslationKeyDiagnostic,
+  );
+  const allUnusedTargets = allUnusedDiagnostics.map(getUnusedTranslationKeyTarget).filter(Boolean);
+  const addedBulkActionKeys = new Set();
+
+  for (const target of selectedTargets) {
+    const createDeleteAction = (title, keyPaths, diagnostics, isPreferred = false) => {
+      const deletionEdits = findUnusedTranslationKeysRemovalEdits({
+        workspaceRoot,
+        namespace: target.namespace,
+        keyPaths,
+        openDocuments,
+        dictionaryPublicPaths,
+        cache: analysisCache,
+      });
+
+      if (!deletionEdits.length) {
+        return null;
+      }
+
+      const action = new vscode.CodeAction(title, vscode.CodeActionKind.QuickFix);
+      action.diagnostics = diagnostics;
+      action.edit = createDeleteWorkspaceEdit(deletionEdits);
+      action.isPreferred = isPreferred;
+      return action;
+    };
+
+    const diagnostic = context.diagnostics.find(
+      (candidate) =>
+        isUnusedTranslationKeyDiagnostic(candidate) &&
+        getUnusedTranslationKeyTarget(candidate)?.namespace === target.namespace &&
+        getUnusedTranslationKeyTarget(candidate)?.keyPath === target.keyPath,
+    );
+
+    const singleAction = createDeleteAction(
+      `Delete "${target.keyPath}" from all ${target.namespace}.json dictionaries`,
+      [target.keyPath],
+      diagnostic ? [diagnostic] : [],
+      true,
+    );
+
+    if (singleAction) {
+      actions.push(singleAction);
+    }
+
+    const parentPath = getParentKeyPath(target.keyPath);
+    const namespaceTargets = allUnusedTargets.filter((candidate) => candidate.namespace === target.namespace);
+    const namespaceDiagnostics = allUnusedDiagnostics.filter((candidate) => {
+      const candidateTarget = getUnusedTranslationKeyTarget(candidate);
+      return candidateTarget?.namespace === target.namespace;
+    });
+
+    if (parentPath) {
+      const parentActionKey = `${target.namespace}\0${parentPath}`;
+
+      if (!addedBulkActionKeys.has(parentActionKey)) {
+        addedBulkActionKeys.add(parentActionKey);
+
+        const parentTargets = namespaceTargets.filter((candidate) =>
+          candidate.keyPath.startsWith(`${parentPath}.`),
+        );
+        const parentDiagnostics = allUnusedDiagnostics.filter((candidate) => {
+          const candidateTarget = getUnusedTranslationKeyTarget(candidate);
+          return (
+            candidateTarget?.namespace === target.namespace &&
+            candidateTarget.keyPath.startsWith(`${parentPath}.`)
+          );
+        });
+        const parentAction = createDeleteAction(
+          `Delete all "${parentPath}.*" from all ${target.namespace}.json dictionaries`,
+          parentTargets.map((candidate) => candidate.keyPath),
+          parentDiagnostics,
+        );
+
+        if (parentAction) {
+          actions.push(parentAction);
+        }
+      }
+    }
+
+    const namespaceActionKey = `${target.namespace}\0*`;
+
+    if (!addedBulkActionKeys.has(namespaceActionKey)) {
+      addedBulkActionKeys.add(namespaceActionKey);
+
+      const allAction = createDeleteAction(
+        `Delete all unused attributes from all ${target.namespace}.json dictionaries`,
+        namespaceTargets.map((candidate) => candidate.keyPath),
+        namespaceDiagnostics,
+      );
+
+      if (allAction) {
+        actions.push(allAction);
+      }
+    }
+  }
+
+  return actions;
+}
+
+function createDeleteWorkspaceEdit(deletionEdits) {
+  const workspaceEdit = new vscode.WorkspaceEdit();
+
+  for (const deletionEdit of deletionEdits) {
+    const uri = vscode.Uri.file(deletionEdit.filePath);
+
+    workspaceEdit.delete(
+      uri,
+      new vscode.Range(
+        new vscode.Position(deletionEdit.startPosition.line, deletionEdit.startPosition.character),
+        new vscode.Position(deletionEdit.endPosition.line, deletionEdit.endPosition.character),
+      ),
+    );
+  }
+
+  return workspaceEdit;
+}
+
+function getParentKeyPath(keyPath) {
+  const lastDot = keyPath.lastIndexOf(".");
+
+  if (lastDot === -1) {
+    return null;
+  }
+
+  return keyPath.slice(0, lastDot);
+}
+
 function deactivate() {
   if (refreshTimer) {
     clearTimeout(refreshTimer);
@@ -71,13 +225,14 @@ function deactivate() {
 
 function refreshOpenDocuments() {
   const openDocuments = getOpenDocumentTexts();
+  const analysisCache = {};
 
   for (const document of vscode.workspace.textDocuments) {
-    updateDocumentDiagnostics(document, openDocuments);
+    updateDocumentDiagnostics(document, openDocuments, analysisCache);
   }
 }
 
-function updateDocumentDiagnostics(document, openDocuments = getOpenDocumentTexts()) {
+function updateDocumentDiagnostics(document, openDocuments = getOpenDocumentTexts(), analysisCache = {}) {
   if (document.uri.scheme !== "file") {
     return;
   }
@@ -99,9 +254,10 @@ function updateDocumentDiagnostics(document, openDocuments = getOpenDocumentText
       workspaceRoot,
       openDocuments,
       dictionaryPublicPaths,
+      cache: analysisCache,
     });
   } else if (isJsonDocument(document)) {
-    if (!isLocaleJsonFile(document.uri.fsPath, workspaceRoot, dictionaryPublicPaths)) {
+    if (!isLocaleJsonFile(document.uri.fsPath, workspaceRoot, dictionaryPublicPaths, analysisCache)) {
       diagnostics.delete(document.uri);
       return;
     }
@@ -112,6 +268,7 @@ function updateDocumentDiagnostics(document, openDocuments = getOpenDocumentText
       workspaceRoot,
       openDocuments,
       dictionaryPublicPaths,
+      cache: analysisCache,
     });
   } else {
     diagnostics.delete(document.uri);
@@ -248,6 +405,7 @@ function debugActiveFile() {
     workspaceRoot,
     openDocuments,
     dictionaryPublicPaths: getDictionaryPublicPaths(),
+    cache: {},
   });
 
   output.clear();
@@ -269,7 +427,32 @@ function toVsCodeDiagnostic(document, diagnostic) {
   );
 
   vsCodeDiagnostic.source = "simple-i18n-checker";
+  vsCodeDiagnostic.code = diagnostic.code;
+  vsCodeDiagnostic.data = diagnostic.data;
   return vsCodeDiagnostic;
+}
+
+function isUnusedTranslationKeyDiagnostic(diagnostic) {
+  return diagnostic.source === "simple-i18n-checker" && diagnostic.code === "unusedTranslationKey";
+}
+
+function getUnusedTranslationKeyTarget(diagnostic) {
+  if (diagnostic.data?.namespace && diagnostic.data?.keyPath) {
+    return diagnostic.data;
+  }
+
+  const match = diagnostic.message.match(
+    /^Translation key "(.+)" is not used by any TSX file with namespace "(.+)"\.$/,
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    keyPath: match[1],
+    namespace: match[2],
+  };
 }
 
 function toVsCodeSeverity(severity) {
