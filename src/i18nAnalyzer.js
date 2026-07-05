@@ -215,6 +215,10 @@ function findKeySegmentAtOffset(usage, offset) {
     return null;
   }
 
+  if (usage.isDynamic) {
+    return null;
+  }
+
   let segmentStart = usage.keyStart;
   const parts = usage.key.split(".");
 
@@ -300,18 +304,12 @@ function findDestructuredLocalName(source, propertyName) {
 
 function findTranslationCalls(text, tName) {
   const escapedName = escapeRegExp(tName);
-  const callRegex = new RegExp(`(?<![\\w$.])${escapedName}\\s*\\(\\s*(["'\`])([^"'\`]+)\\1`, "g");
+  const callRegex = new RegExp(`(?<![\\w$.])${escapedName}\\s*\\(`, "g");
   const usages = [];
+  const dynamicValues = findDynamicExpressionValues(text);
 
   for (const match of text.matchAll(callRegex)) {
-    const key = match[2];
-    const keyStart = match.index + match[0].lastIndexOf(key);
-
-    usages.push({
-      key,
-      keyStart,
-      keyEnd: keyStart + key.length,
-    });
+    usages.push(...parseTranslationKeyArgument(text, match.index + match[0].length, dynamicValues));
   }
 
   return usages;
@@ -335,23 +333,448 @@ function findMemberTranslationCalls(text, objectName, methodName) {
   const escapedObjectName = escapeRegExp(objectName);
   const escapedMethodName = escapeRegExp(methodName);
   const callRegex = new RegExp(
-    `(?<![\\w$])${escapedObjectName}\\s*\\.\\s*${escapedMethodName}\\s*\\(\\s*(["'\`])([^"'\`]+)\\1`,
+    `(?<![\\w$])${escapedObjectName}\\s*\\.\\s*${escapedMethodName}\\s*\\(`,
     "g",
   );
   const usages = [];
+  const dynamicValues = findDynamicExpressionValues(text);
 
   for (const match of text.matchAll(callRegex)) {
-    const key = match[2];
-    const keyStart = match.index + match[0].lastIndexOf(key);
-
-    usages.push({
-      key,
-      keyStart,
-      keyEnd: keyStart + key.length,
-    });
+    usages.push(...parseTranslationKeyArgument(text, match.index + match[0].length, dynamicValues));
   }
 
   return usages;
+}
+
+function parseTranslationKeyArgument(text, offset, dynamicValues) {
+  const keyStart = skipWhitespaceAt(text, offset);
+  const quote = text[keyStart];
+
+  if (quote === "\"" || quote === "'") {
+    const parsed = parseQuotedString(text, keyStart, quote);
+
+    if (!parsed) {
+      return [];
+    }
+
+    return [
+      {
+        key: parsed.value,
+        keyStart: parsed.valueStart,
+        keyEnd: parsed.valueEnd,
+      },
+    ];
+  }
+
+  if (quote !== "`") {
+    return [];
+  }
+
+  const parsedTemplate = parseTemplateLiteral(text, keyStart);
+
+  if (!parsedTemplate) {
+    return [];
+  }
+
+  if (!parsedTemplate.expressions.length) {
+    return [
+      {
+        key: parsedTemplate.parts[0],
+        keyStart: parsedTemplate.contentStart,
+        keyEnd: parsedTemplate.contentEnd,
+      },
+    ];
+  }
+
+  const expressionValues = [];
+
+  for (const expression of parsedTemplate.expressions) {
+    const values = dynamicValues.get(normalizeExpression(expression.source));
+
+    if (!values?.length) {
+      return [];
+    }
+
+    expressionValues.push(values);
+  }
+
+  return combineTemplateValues(parsedTemplate.parts, expressionValues).map((key) => ({
+    key,
+    keyStart: parsedTemplate.contentStart,
+    keyEnd: parsedTemplate.contentEnd,
+    isDynamic: true,
+  }));
+}
+
+function parseQuotedString(text, start, quote) {
+  let index = start + 1;
+  let value = "";
+
+  while (index < text.length) {
+    const char = text[index];
+
+    if (char === quote) {
+      return {
+        value,
+        valueStart: start + 1,
+        valueEnd: index,
+      };
+    }
+
+    if (char === "\\") {
+      if (index + 1 >= text.length) {
+        return null;
+      }
+
+      value += text[index + 1];
+      index += 2;
+      continue;
+    }
+
+    value += char;
+    index += 1;
+  }
+
+  return null;
+}
+
+function parseTemplateLiteral(text, start) {
+  let index = start + 1;
+  let currentPart = "";
+  const parts = [];
+  const expressions = [];
+
+  while (index < text.length) {
+    const char = text[index];
+
+    if (char === "`") {
+      parts.push(currentPart);
+      return {
+        parts,
+        expressions,
+        contentStart: start + 1,
+        contentEnd: index,
+      };
+    }
+
+    if (char === "\\") {
+      if (index + 1 >= text.length) {
+        return null;
+      }
+
+      currentPart += text[index + 1];
+      index += 2;
+      continue;
+    }
+
+    if (char === "$" && text[index + 1] === "{") {
+      const expression = parseTemplateExpression(text, index + 2);
+
+      if (!expression) {
+        return null;
+      }
+
+      parts.push(currentPart);
+      expressions.push(expression);
+      currentPart = "";
+      index = expression.end + 1;
+      continue;
+    }
+
+    currentPart += char;
+    index += 1;
+  }
+
+  return null;
+}
+
+function parseTemplateExpression(text, start) {
+  let index = start;
+  let depth = 1;
+  let quote = null;
+  let templateDepth = 0;
+
+  while (index < text.length) {
+    const char = text[index];
+
+    if (quote) {
+      if (char === "\\") {
+        index += 2;
+        continue;
+      }
+
+      if (char === quote) {
+        quote = null;
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (char === "\"" || char === "'") {
+      quote = char;
+      index += 1;
+      continue;
+    }
+
+    if (char === "`") {
+      templateDepth = templateDepth ? templateDepth - 1 : templateDepth + 1;
+      index += 1;
+      continue;
+    }
+
+    if (!templateDepth && char === "{") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (!templateDepth && char === "}") {
+      depth -= 1;
+
+      if (depth === 0) {
+        return {
+          source: text.slice(start, index),
+          start,
+          end: index,
+        };
+      }
+    }
+
+    index += 1;
+  }
+
+  return null;
+}
+
+function combineTemplateValues(parts, expressionValues) {
+  let combinations = [parts[0]];
+
+  for (let index = 0; index < expressionValues.length; index += 1) {
+    const nextCombinations = [];
+
+    for (const prefix of combinations) {
+      for (const value of expressionValues[index]) {
+        nextCombinations.push(`${prefix}${value}${parts[index + 1]}`);
+      }
+    }
+
+    combinations = nextCombinations;
+  }
+
+  return combinations;
+}
+
+function findDynamicExpressionValues(text) {
+  const objectKeys = findConstObjectKeySets(text);
+  const expressionValues = new Map();
+
+  for (const [objectName, keys] of objectKeys) {
+    const accessRegex = new RegExp(`(?<![\\w$])${escapeRegExp(objectName)}\\s*\\[([^\\]]+)\\]`, "g");
+
+    for (const match of text.matchAll(accessRegex)) {
+      addExpressionValues(expressionValues, normalizeExpression(match[1]), keys);
+    }
+  }
+
+  return expressionValues;
+}
+
+function findConstObjectKeySets(text) {
+  const objects = new Map();
+  const constRegex = /\bconst\s+([A-Za-z_$][\w$]*)\b[^=]*=\s*\{/g;
+
+  for (const match of text.matchAll(constRegex)) {
+    const objectStart = match.index + match[0].length - 1;
+    const objectEnd = findMatchingBrace(text, objectStart);
+
+    if (objectEnd === -1) {
+      continue;
+    }
+
+    const keys = parseTopLevelObjectKeys(text.slice(objectStart + 1, objectEnd));
+
+    if (keys.length) {
+      objects.set(match[1], keys);
+    }
+  }
+
+  return objects;
+}
+
+function parseTopLevelObjectKeys(source) {
+  const keys = [];
+  let index = 0;
+
+  while (index < source.length) {
+    index = skipWhitespaceAndCommasAt(source, index);
+
+    if (index >= source.length) {
+      break;
+    }
+
+    const key = parseObjectPropertyKey(source, index);
+
+    if (!key) {
+      index += 1;
+      continue;
+    }
+
+    index = skipWhitespaceAt(source, key.end);
+
+    if (source[index] !== ":") {
+      continue;
+    }
+
+    keys.push(key.value);
+    index += 1;
+    let depth = 0;
+
+    while (index < source.length) {
+      const char = source[index];
+
+      if (char === "\"" || char === "'" || char === "`") {
+        const end = findStringEnd(source, index, char);
+        index = end === -1 ? source.length : end + 1;
+        continue;
+      }
+
+      if (char === "{" || char === "[" || char === "(") {
+        depth += 1;
+      } else if (char === "}" || char === "]" || char === ")") {
+        depth = Math.max(0, depth - 1);
+      } else if (char === "," && depth === 0) {
+        index += 1;
+        break;
+      }
+
+      index += 1;
+    }
+  }
+
+  return keys;
+}
+
+function parseObjectPropertyKey(source, start) {
+  const char = source[start];
+
+  if (char === "\"" || char === "'") {
+    const parsed = parseQuotedString(source, start, char);
+
+    return parsed
+      ? {
+          value: parsed.value,
+          end: parsed.valueEnd + 1,
+        }
+      : null;
+  }
+
+  const identifier = source.slice(start).match(/^[A-Za-z_$][\w$-]*/);
+
+  if (!identifier) {
+    return null;
+  }
+
+  return {
+    value: identifier[0],
+    end: start + identifier[0].length,
+  };
+}
+
+function addExpressionValues(expressionValues, expression, values) {
+  if (!expression) {
+    return;
+  }
+
+  const existing = expressionValues.get(expression) ?? [];
+  expressionValues.set(expression, [...new Set([...existing, ...values])]);
+}
+
+function findMatchingBrace(text, start) {
+  let index = start;
+  let depth = 0;
+  let quote = null;
+
+  while (index < text.length) {
+    const char = text[index];
+
+    if (quote) {
+      if (char === "\\") {
+        index += 2;
+        continue;
+      }
+
+      if (char === quote) {
+        quote = null;
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (char === "\"" || char === "'" || char === "`") {
+      quote = char;
+      index += 1;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+
+      if (depth === 0) {
+        return index;
+      }
+    }
+
+    index += 1;
+  }
+
+  return -1;
+}
+
+function findStringEnd(text, start, quote) {
+  let index = start + 1;
+
+  while (index < text.length) {
+    if (text[index] === "\\") {
+      index += 2;
+      continue;
+    }
+
+    if (text[index] === quote) {
+      return index;
+    }
+
+    index += 1;
+  }
+
+  return -1;
+}
+
+function skipWhitespaceAt(text, offset) {
+  let index = offset;
+
+  while (/\s/.test(text[index] || "")) {
+    index += 1;
+  }
+
+  return index;
+}
+
+function skipWhitespaceAndCommasAt(text, offset) {
+  let index = offset;
+
+  while (/[\s,]/.test(text[index] || "")) {
+    index += 1;
+  }
+
+  return index;
+}
+
+function normalizeExpression(source) {
+  return source.replace(/\s+/g, "");
 }
 
 function readDictionaries(workspaceRoot, namespace, openDocuments, dictionaryPublicPaths) {
