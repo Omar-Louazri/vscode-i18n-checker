@@ -1,0 +1,37 @@
+{
+  "name": "simple-i18n-checker",
+  "displayName": "Simple i18n Checker",
+  "description": "Underline missing and unused dot-path translation keys for TSX files.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:typescriptreact",
+    "onLanguage:json"
+  ],
+  "main": "./src/extension.js",
+  "scripts": {
+    "test": "echo \"No tests yet\"",
+    "start": "echo \"Press F5 in VS Code to run the extension\""
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "simpleI18nChecker.refresh",
+        "title": "Simple i18n Checker: Refresh Diagnostics"
+      },
+      {
+        "command": "simpleI18nChecker.debugActiveFile",
+        "title": "Simple i18n Checker: Debug Active File"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0"
+  }
+}
