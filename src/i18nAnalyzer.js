@@ -4,17 +4,78 @@ const fs = require("fs");
 const path = require("path");
 
 const TSX_EXTENSIONS = new Set([".tsx"]);
+const IGNORED_DIRECTORIES = new Set([".git", ".next", "node_modules", "vscode-i18n-checker"]);
+const SUPPORTED_LANGUAGES = Object.freeze({
+  en: "English",
+  fr: "French",
+  es: "Spanish",
+  de: "German",
+  it: "Italian",
+  pt: "Portuguese",
+  nl: "Dutch",
+  ru: "Russian",
+  uk: "Ukrainian",
+  pl: "Polish",
+  cs: "Czech",
+  sk: "Slovak",
+  hu: "Hungarian",
+  ro: "Romanian",
+  bg: "Bulgarian",
+  el: "Greek",
+  tr: "Turkish",
+  sv: "Swedish",
+  no: "Norwegian",
+  da: "Danish",
+  fi: "Finnish",
+  et: "Estonian",
+  lv: "Latvian",
+  lt: "Lithuanian",
+  is: "Icelandic",
+  ga: "Irish",
+  cy: "Welsh",
+  ar: "Arabic",
+  he: "Hebrew",
+  fa: "Persian (Farsi)",
+  ur: "Urdu",
+  zh: "Chinese (generic)",
+  ja: "Japanese",
+  ko: "Korean",
+  th: "Thai",
+  vi: "Vietnamese",
+  id: "Indonesian",
+  ms: "Malay",
+  hi: "Hindi",
+  bn: "Bengali",
+  ta: "Tamil",
+  te: "Telugu",
+  ml: "Malayalam",
+  mr: "Marathi",
+  sw: "Swahili",
+  am: "Amharic",
+  zu: "Zulu",
+  af: "Afrikaans",
+  sr: "Serbian",
+  hr: "Croatian",
+  sl: "Slovenian",
+  mk: "Macedonian",
+  sq: "Albanian",
+  ca: "Catalan",
+  eu: "Basque",
+  gl: "Galician",
+  eo: "Esperanto",
+});
+const SUPPORTED_LANGUAGE_CODES = new Set(Object.keys(SUPPORTED_LANGUAGES));
 
-function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments }) {
+function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments, dictionaryPublicPaths }) {
   const diagnostics = [];
   const contexts = findTranslationContexts(text);
 
   for (const context of contexts) {
-    const dictionaries = readDictionaries(workspaceRoot, context.namespace, openDocuments);
+    const dictionaries = readDictionaries(workspaceRoot, context.namespace, openDocuments, dictionaryPublicPaths);
     const existingDictionaries = dictionaries.files.filter((file) => file.exists);
     const namespaceTarget = existingDictionaries.length
       ? existingDictionaries.map((file) => path.relative(workspaceRoot, file.filePath)).join(", ")
-      : `public/*/${context.namespace}.json`;
+      : getNamespaceTarget(workspaceRoot, context.namespace, dictionaryPublicPaths);
 
     for (const usage of findTranslationCalls(text, context.tName)) {
       if (!existingDictionaries.length) {
@@ -32,7 +93,9 @@ function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments }) {
         .map((file) => file.locale);
 
       if (missingLocales.length) {
-        const missingFiles = missingLocales.map((locale) => `public/${locale}/${context.namespace}.json`);
+        const missingFiles = dictionaries.files
+          .filter((file) => !file.keys.has(usage.key))
+          .map((file) => path.relative(workspaceRoot, file.filePath));
 
         diagnostics.push({
           start: usage.keyStart,
@@ -49,8 +112,8 @@ function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments }) {
   return diagnostics;
 }
 
-function analyzeJsonDocument({ text, filePath, workspaceRoot, openDocuments }) {
-  const info = getLocaleJsonInfo(filePath, workspaceRoot);
+function analyzeJsonDocument({ text, filePath, workspaceRoot, openDocuments, dictionaryPublicPaths }) {
+  const info = getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths);
 
   if (!info) {
     return [];
@@ -81,7 +144,7 @@ function analyzeJsonDocument({ text, filePath, workspaceRoot, openDocuments }) {
     }));
 }
 
-function inspectDocument({ text, filePath, workspaceRoot, openDocuments }) {
+function inspectDocument({ text, filePath, workspaceRoot, openDocuments, dictionaryPublicPaths }) {
   if (path.extname(filePath) === ".tsx") {
     const contexts = findTranslationContexts(text);
 
@@ -91,8 +154,9 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments }) {
       contexts: contexts.map((context) => ({
         namespace: context.namespace,
         tName: context.tName,
-        dictionaries: readDictionaries(workspaceRoot, context.namespace, openDocuments).files.map((file) => ({
+        dictionaries: readDictionaries(workspaceRoot, context.namespace, openDocuments, dictionaryPublicPaths).files.map((file) => ({
           locale: file.locale,
+          language: getSupportedLanguageName(file.locale),
           exists: file.exists,
           filePath: path.relative(workspaceRoot, file.filePath),
           keyCount: file.keys.size,
@@ -103,13 +167,14 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments }) {
   }
 
   if (path.extname(filePath) === ".json") {
-    const info = getLocaleJsonInfo(filePath, workspaceRoot);
+    const info = getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths);
     const parsed = parseJsonWithLocations(text);
 
     return {
       kind: "json",
       filePath,
       locale: info?.locale ?? null,
+      language: info?.locale ? getSupportedLanguageName(info.locale) : null,
       namespace: info?.namespace ?? null,
       keyCount: parsed.keys.length,
       keys: parsed.keys.map((key) => key.path),
@@ -250,62 +315,149 @@ function findTranslationCalls(text, tName) {
   return usages;
 }
 
-function readDictionaries(workspaceRoot, namespace, openDocuments) {
-  const publicDir = path.join(workspaceRoot, "public");
+function readDictionaries(workspaceRoot, namespace, openDocuments, dictionaryPublicPaths) {
   const files = [];
+  const publicDirs = findPublicDirectories(workspaceRoot, dictionaryPublicPaths);
 
-  if (!fs.existsSync(publicDir)) {
+  if (!publicDirs.length) {
     return { files };
   }
 
-  for (const locale of safeReadDir(publicDir)) {
-    const localeDir = path.join(publicDir, locale);
-    const filePath = path.join(localeDir, `${namespace}.json`);
+  for (const publicDir of publicDirs) {
+    for (const locale of safeReadDir(publicDir)) {
+      const localeDir = path.join(publicDir, locale);
+      const filePath = path.join(localeDir, `${namespace}.json`);
 
-    if (!isDirectory(localeDir)) {
-      continue;
+      if (!isSupportedLanguageCode(locale) || !isDirectory(localeDir)) {
+        continue;
+      }
+
+      let keys = new Set();
+
+      if (fs.existsSync(filePath)) {
+        const text = readTextFile(filePath, openDocuments);
+        const parsed = parseJsonWithLocations(text);
+        keys = new Set(parsed.keys.map((key) => key.path));
+      }
+
+      files.push({
+        locale,
+        filePath,
+        exists: fs.existsSync(filePath),
+        keys,
+      });
     }
-
-    let keys = new Set();
-
-    if (fs.existsSync(filePath)) {
-      const text = readTextFile(filePath, openDocuments);
-      const parsed = parseJsonWithLocations(text);
-      keys = new Set(parsed.keys.map((key) => key.path));
-    }
-
-    files.push({
-      locale,
-      filePath,
-      exists: fs.existsSync(filePath),
-      keys,
-    });
   }
 
   return { files };
 }
 
-function getLocaleJsonInfo(filePath, workspaceRoot) {
-  const relativePath = path.relative(path.join(workspaceRoot, "public"), filePath);
+function getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths) {
+  for (const publicDir of findPublicDirectories(workspaceRoot, dictionaryPublicPaths)) {
+    const relativePath = path.relative(publicDir, filePath);
 
-  if (!isRelativeChildPath(relativePath)) {
-    return null;
+    if (!isRelativeChildPath(relativePath)) {
+      continue;
+    }
+
+    const segments = relativePath.split(path.sep);
+
+    if (segments.length !== 2 || path.extname(segments[1]) !== ".json") {
+      continue;
+    }
+
+    if (!isSupportedLanguageCode(segments[0])) {
+      continue;
+    }
+
+    return {
+      locale: segments[0],
+      language: getSupportedLanguageName(segments[0]),
+      namespace: path.basename(segments[1], ".json"),
+      publicDir,
+    };
   }
 
-  const segments = relativePath.split(path.sep);
-
-  if (segments.length !== 2 || path.extname(segments[1]) !== ".json") {
-    return null;
-  }
-
-  return {
-    locale: segments[0],
-    namespace: path.basename(segments[1], ".json"),
-  };
+  return null;
 }
 
-function isLocaleJsonFile(filePath, workspaceRoot) {
-  return Boolean(getLocaleJsonInfo(filePath, workspaceRoot));
+function isLocaleJsonFile(filePath, workspaceRoot, dictionaryPublicPaths) {
+  return Boolean(getLocaleJsonInfo(filePath, workspaceRoot, dictionaryPublicPaths));
+}
+
+function findDictionaryFile(workspaceRoot, locale, namespace, dictionaryPublicPaths) {
+  if (!isSupportedLanguageCode(locale)) {
+    return null;
+  }
+
+  for (const publicDir of findPublicDirectories(workspaceRoot, dictionaryPublicPaths)) {
+    const filePath = path.join(publicDir, locale, `${namespace}.json`);
+
+    if (fs.existsSync(filePath)) {
+      return filePath;
+    }
+  }
+
+  return null;
+}
+
+function getSupportedLanguageName(locale) {
+  return SUPPORTED_LANGUAGES[locale] ?? null;
+}
+
+function isSupportedLanguageCode(locale) {
+  return SUPPORTED_LANGUAGE_CODES.has(locale);
+}
+
+function getNamespaceTarget(workspaceRoot, namespace, dictionaryPublicPaths) {
+  const publicDirs = findPublicDirectories(workspaceRoot, dictionaryPublicPaths);
+
+  if (!publicDirs.length) {
+    return `**/public/*/${namespace}.json`;
+  }
+
+  return publicDirs
+    .map((publicDir) => `${path.relative(workspaceRoot, publicDir)}/*/${namespace}.json`)
+    .join(", ");
+}
+
+function findPublicDirectories(workspaceRoot, dictionaryPublicPaths) {
+  const publicDirs = new Set();
+
+  for (const configuredPath of dictionaryPublicPaths ?? []) {
+    const publicDir = path.isAbsolute(configuredPath)
+      ? configuredPath
+      : path.join(workspaceRoot, configuredPath);
+
+    if (isDirectory(publicDir)) {
+      publicDirs.add(publicDir);
+    }
+  }
+
+  walk(workspaceRoot);
+
+  return [...publicDirs];
+
+  function walk(directory) {
+    for (const entry of safeReadDir(directory)) {
+      if (IGNORED_DIRECTORIES.has(entry)) {
+        continue;
+      }
+
+      const entryPath = path.join(directory, entry);
+
+      if (!isDirectory(entryPath)) {
+        continue;
+      }
+
+      if (entry === "public") {
+        publicDirs.add(entryPath);
+        continue;
+      }
+
+      walk(entryPath);
+    }
+  }
 }
 
 function isInsidePath(root, filePath) {
@@ -353,14 +505,13 @@ function readTextFile(filePath, openDocuments) {
 
 function findFiles(root, extensions) {
   const results = [];
-  const ignoredDirectories = new Set([".git", ".next", "node_modules", "vscode-i18n-checker"]);
 
   walk(root);
   return results;
 
   function walk(directory) {
     for (const entry of safeReadDir(directory)) {
-      if (ignoredDirectories.has(entry)) {
+      if (IGNORED_DIRECTORIES.has(entry)) {
         continue;
       }
 
@@ -628,11 +779,15 @@ function escapeRegExp(value) {
 module.exports = {
   analyzeJsonDocument,
   analyzeTsxDocument,
+  findDictionaryFile,
   findJsonKeyLocation,
   findTranslationCalls,
   findTranslationContexts,
   findTranslationKeyAtOffset,
+  getSupportedLanguageName,
   inspectDocument,
   isLocaleJsonFile,
+  isSupportedLanguageCode,
   parseJsonWithLocations,
+  SUPPORTED_LANGUAGES,
 };

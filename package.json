@@ -27,6 +27,14 @@
           "type": "string",
           "default": "fr",
           "description": "Default locale folder used when navigating from TSX translation keys to JSON dictionaries."
+        },
+        "simpleI18nChecker.dictionaryPublicPaths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional public directory paths to scan for locale dictionaries, relative to the workspace root or absolute. The extension also auto-discovers public folders such as frontend/public."
         }
       }
     },

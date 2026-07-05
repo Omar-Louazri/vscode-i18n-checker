@@ -5,6 +5,7 @@ const vscode = require("vscode");
 const {
   analyzeJsonDocument,
   analyzeTsxDocument,
+  findDictionaryFile,
   findJsonKeyLocation,
   findTranslationKeyAtOffset,
   inspectDocument,
@@ -88,6 +89,7 @@ function updateDocumentDiagnostics(document, openDocuments = getOpenDocumentText
   }
 
   const text = document.getText();
+  const dictionaryPublicPaths = getDictionaryPublicPaths();
   let rawDiagnostics = [];
 
   if (isTsxDocument(document)) {
@@ -96,9 +98,10 @@ function updateDocumentDiagnostics(document, openDocuments = getOpenDocumentText
       filePath: document.uri.fsPath,
       workspaceRoot,
       openDocuments,
+      dictionaryPublicPaths,
     });
   } else if (isJsonDocument(document)) {
-    if (!isLocaleJsonFile(document.uri.fsPath, workspaceRoot)) {
+    if (!isLocaleJsonFile(document.uri.fsPath, workspaceRoot, dictionaryPublicPaths)) {
       diagnostics.delete(document.uri);
       return;
     }
@@ -108,6 +111,7 @@ function updateDocumentDiagnostics(document, openDocuments = getOpenDocumentText
       filePath: document.uri.fsPath,
       workspaceRoot,
       openDocuments,
+      dictionaryPublicPaths,
     });
   } else {
     diagnostics.delete(document.uri);
@@ -161,7 +165,17 @@ async function provideDefinition(document, position) {
   }
 
   const defaultLocale = getDefaultLocale();
-  const dictionaryPath = path.join(workspaceRoot, "public", defaultLocale, `${target.namespace}.json`);
+  const dictionaryPath = findDictionaryFile(
+    workspaceRoot,
+    defaultLocale,
+    target.namespace,
+    getDictionaryPublicPaths(),
+  );
+
+  if (!dictionaryPath) {
+    return undefined;
+  }
+
   const dictionaryUri = vscode.Uri.file(dictionaryPath);
   let dictionaryDocument;
 
@@ -194,6 +208,20 @@ function getDefaultLocale() {
   return String(configuredLocale || "fr").trim() || "fr";
 }
 
+function getDictionaryPublicPaths() {
+  const configuredPaths = vscode.workspace
+    .getConfiguration("simpleI18nChecker")
+    .get("dictionaryPublicPaths", []);
+
+  if (!Array.isArray(configuredPaths)) {
+    return [];
+  }
+
+  return configuredPaths
+    .filter((configuredPath) => typeof configuredPath === "string" && configuredPath.trim())
+    .map((configuredPath) => configuredPath.trim());
+}
+
 function debugActiveFile() {
   const editor = vscode.window.activeTextEditor;
 
@@ -219,6 +247,7 @@ function debugActiveFile() {
     filePath: document.uri.fsPath,
     workspaceRoot,
     openDocuments,
+    dictionaryPublicPaths: getDictionaryPublicPaths(),
   });
 
   output.clear();

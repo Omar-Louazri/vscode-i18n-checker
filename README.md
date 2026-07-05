@@ -3,13 +3,17 @@
 A very small VS Code extension for this project style:
 
 - TSX calls `const { locale, t } = useTranslation("landing")` or `useTranslate("landing")`.
-- Locale dictionaries live at `public/<locale>/<namespace>.json`.
+- Locale dictionaries live at `public/<locale>/<namespace>.json`. `public` folders can be nested, for example `frontend/public/<locale>/<namespace>.json`.
 - Translation calls use dot paths like `t("metadata.title", "Default")`.
 
 ## What it underlines
 
 - In `.tsx` files: any `t("key")` where `key` is missing from one or more matching locale JSON files.
 - In `public/<locale>/<namespace>.json` files: any leaf JSON key that is not used by any `.tsx` file using that namespace.
+
+## Supported Languages v1
+
+Only these locale folder names are treated as dictionaries: `en`, `fr`, `es`, `de`, `it`, `pt`, `nl`, `ru`, `uk`, `pl`, `cs`, `sk`, `hu`, `ro`, `bg`, `el`, `tr`, `sv`, `no`, `da`, `fi`, `et`, `lv`, `lt`, `is`, `ga`, `cy`, `ar`, `he`, `fa`, `ur`, `zh`, `ja`, `ko`, `th`, `vi`, `id`, `ms`, `hi`, `bn`, `ta`, `te`, `ml`, `mr`, `sw`, `am`, `zu`, `af`, `sr`, `hr`, `sl`, `mk`, `sq`, `ca`, `eu`, `gl`, `eo`.
 
 ## Run it locally
 
