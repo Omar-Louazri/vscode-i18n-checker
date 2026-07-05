@@ -77,7 +77,7 @@ function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments, dict
       ? existingDictionaries.map((file) => path.relative(workspaceRoot, file.filePath)).join(", ")
       : getNamespaceTarget(workspaceRoot, context.namespace, dictionaryPublicPaths);
 
-    for (const usage of findTranslationCalls(text, context.tName)) {
+    for (const usage of findTranslationCallsForContext(text, context)) {
       if (!existingDictionaries.length) {
         diagnostics.push({
           start: usage.keyStart,
@@ -100,9 +100,10 @@ function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments, dict
         diagnostics.push({
           start: usage.keyStart,
           end: usage.keyEnd,
-          message: `Translation key "${usage.key}" is used here, but is missing from these locale dictionaries: ${missingFiles.join(
-            ", ",
-          )}. Add the same key to every locale for namespace "${context.namespace}".`,
+          message:
+            missingFiles.length === 1
+              ? `Add the attribute "${usage.key}" to ${missingFiles[0]}.`
+              : `Add the attribute "${usage.key}" to these JSON files: ${missingFiles.join(", ")}.`,
           severity: "warning",
         });
       }
@@ -161,7 +162,7 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments, diction
           filePath: path.relative(workspaceRoot, file.filePath),
           keyCount: file.keys.size,
         })),
-        usages: findTranslationCalls(text, context.tName).map((usage) => usage.key),
+        usages: findTranslationCallsForContext(text, context).map((usage) => usage.key),
       })),
     };
   }
@@ -191,7 +192,7 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments, diction
 
 function findTranslationKeyAtOffset(text, offset) {
   for (const context of findTranslationContexts(text)) {
-    for (const usage of findTranslationCalls(text, context.tName)) {
+    for (const usage of findTranslationCallsForContext(text, context)) {
       const segment = findKeySegmentAtOffset(usage, offset);
 
       if (segment) {
@@ -252,16 +253,17 @@ function findTranslationContexts(text) {
 
   for (const match of text.matchAll(assignmentRegex)) {
     const namespace = match.groups.namespace;
-    const destructure = match.groups.destructure;
+    if (match.groups.destructure) {
+      const tName = findDestructuredLocalName(match.groups.destructure, "t");
 
-    if (!destructure) {
+      if (tName) {
+        contexts.push({ namespace, tName });
+      }
       continue;
     }
 
-    const tName = findDestructuredLocalName(destructure, "t");
-
-    if (tName) {
-      contexts.push({ namespace, tName });
+    if (match.groups.identifier) {
+      contexts.push({ namespace, tName: match.groups.identifier, objectName: match.groups.identifier });
     }
   }
 
@@ -298,7 +300,44 @@ function findDestructuredLocalName(source, propertyName) {
 
 function findTranslationCalls(text, tName) {
   const escapedName = escapeRegExp(tName);
-  const callRegex = new RegExp(`(?<![\\w$])${escapedName}\\s*\\(\\s*(["'\`])([^"'\`]+)\\1`, "g");
+  const callRegex = new RegExp(`(?<![\\w$.])${escapedName}\\s*\\(\\s*(["'\`])([^"'\`]+)\\1`, "g");
+  const usages = [];
+
+  for (const match of text.matchAll(callRegex)) {
+    const key = match[2];
+    const keyStart = match.index + match[0].lastIndexOf(key);
+
+    usages.push({
+      key,
+      keyStart,
+      keyEnd: keyStart + key.length,
+    });
+  }
+
+  return usages;
+}
+
+function findTranslationCallsForContext(text, context) {
+  const usages = [];
+
+  if (context.tName) {
+    usages.push(...findTranslationCalls(text, context.tName));
+  }
+
+  if (context.objectName) {
+    usages.push(...findMemberTranslationCalls(text, context.objectName, "t"));
+  }
+
+  return usages.sort((left, right) => left.keyStart - right.keyStart);
+}
+
+function findMemberTranslationCalls(text, objectName, methodName) {
+  const escapedObjectName = escapeRegExp(objectName);
+  const escapedMethodName = escapeRegExp(methodName);
+  const callRegex = new RegExp(
+    `(?<![\\w$])${escapedObjectName}\\s*\\.\\s*${escapedMethodName}\\s*\\(\\s*(["'\`])([^"'\`]+)\\1`,
+    "g",
+  );
   const usages = [];
 
   for (const match of text.matchAll(callRegex)) {
@@ -486,7 +525,7 @@ function findWorkspaceTranslationKeys(workspaceRoot, namespace, openDocuments) {
         continue;
       }
 
-      for (const usage of findTranslationCalls(text, context.tName)) {
+      for (const usage of findTranslationCallsForContext(text, context)) {
         keys.add(usage.key);
       }
     }

@@ -16,7 +16,7 @@
   ],
   "main": "./src/extension.js",
   "scripts": {
-    "test": "echo \"No tests yet\"",
+    "test": "node --test",
     "start": "echo \"Press F5 in VS Code to run the extension\""
   },
   "contributes": {
