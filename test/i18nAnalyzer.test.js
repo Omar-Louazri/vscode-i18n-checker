@@ -69,7 +69,7 @@ test("tsx key checks understand assigned hook variables", () => {
   assert.equal(diagnostics.length, 1);
   assert.equal(
     diagnostics[0].message,
-    'Add the attribute "missing" to these JSON files: public/fr/common.json, public/en/common.json.',
+    'Add the attribute "missing" to these JSON files: public/en/common.json, public/fr/common.json.',
   );
 });
 
