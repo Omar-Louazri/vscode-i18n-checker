@@ -20,6 +20,16 @@
     "start": "echo \"Press F5 in VS Code to run the extension\""
   },
   "contributes": {
+    "configuration": {
+      "title": "Simple i18n Checker",
+      "properties": {
+        "simpleI18nChecker.defaultLocale": {
+          "type": "string",
+          "default": "fr",
+          "description": "Default locale folder used when navigating from TSX translation keys to JSON dictionaries."
+        }
+      }
+    },
     "commands": [
       {
         "command": "simpleI18nChecker.refresh",

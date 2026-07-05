@@ -5,6 +5,8 @@ const vscode = require("vscode");
 const {
   analyzeJsonDocument,
   analyzeTsxDocument,
+  findJsonKeyLocation,
+  findTranslationKeyAtOffset,
   inspectDocument,
   isLocaleJsonFile,
 } = require("./i18nAnalyzer");
@@ -24,6 +26,10 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("simpleI18nChecker.refresh", refresh),
     vscode.commands.registerCommand("simpleI18nChecker.debugActiveFile", debugActiveFile),
+    vscode.languages.registerDefinitionProvider(
+      [{ language: "typescriptreact", scheme: "file" }, { pattern: "**/*.tsx", scheme: "file" }],
+      { provideDefinition },
+    ),
     vscode.workspace.onDidOpenTextDocument(updateDocumentDiagnostics),
     vscode.workspace.onDidChangeTextDocument((event) => {
       if (isRelevantDocument(event.document)) {
@@ -135,6 +141,57 @@ function scheduleOpenDocumentRefresh() {
     refreshTimer = undefined;
     refreshOpenDocuments();
   }, 150);
+}
+
+async function provideDefinition(document, position) {
+  if (!isTsxDocument(document)) {
+    return undefined;
+  }
+
+  const workspaceRoot = getWorkspaceRoot(document.uri);
+
+  if (!workspaceRoot) {
+    return undefined;
+  }
+
+  const target = findTranslationKeyAtOffset(document.getText(), document.offsetAt(position));
+
+  if (!target) {
+    return undefined;
+  }
+
+  const defaultLocale = getDefaultLocale();
+  const dictionaryPath = path.join(workspaceRoot, "public", defaultLocale, `${target.namespace}.json`);
+  const dictionaryUri = vscode.Uri.file(dictionaryPath);
+  let dictionaryDocument;
+
+  try {
+    dictionaryDocument = await vscode.workspace.openTextDocument(dictionaryUri);
+  } catch {
+    return undefined;
+  }
+
+  const keyLocation = findJsonKeyLocation(dictionaryDocument.getText(), target.path);
+
+  if (!keyLocation) {
+    return undefined;
+  }
+
+  return new vscode.Location(
+    dictionaryUri,
+    new vscode.Range(
+      dictionaryDocument.positionAt(keyLocation.keyStart),
+      dictionaryDocument.positionAt(keyLocation.keyEnd),
+    ),
+  );
+}
+
+function getDefaultLocale() {
+  const configuredLocale = vscode.workspace
+    .getConfiguration("simpleI18nChecker")
+    .get("defaultLocale", "fr");
+
+  return String(configuredLocale || "fr").trim() || "fr";
 }
 
 function debugActiveFile() {

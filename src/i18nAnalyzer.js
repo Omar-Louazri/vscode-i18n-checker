@@ -124,6 +124,62 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments }) {
   };
 }
 
+function findTranslationKeyAtOffset(text, offset) {
+  for (const context of findTranslationContexts(text)) {
+    for (const usage of findTranslationCalls(text, context.tName)) {
+      const segment = findKeySegmentAtOffset(usage, offset);
+
+      if (segment) {
+        return {
+          namespace: context.namespace,
+          key: usage.key,
+          path: segment.path,
+          start: segment.start,
+          end: segment.end,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function findKeySegmentAtOffset(usage, offset) {
+  if (offset < usage.keyStart || offset > usage.keyEnd) {
+    return null;
+  }
+
+  let segmentStart = usage.keyStart;
+  const parts = usage.key.split(".");
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    const segmentEnd = segmentStart + part.length;
+
+    if (offset >= segmentStart && offset <= segmentEnd) {
+      return {
+        path: parts.slice(0, index + 1).join("."),
+        start: segmentStart,
+        end: segmentEnd,
+      };
+    }
+
+    segmentStart = segmentEnd + 1;
+  }
+
+  return null;
+}
+
+function findJsonKeyLocation(text, targetPath) {
+  const parsed = parseJsonWithLocations(text);
+
+  if (parsed.error) {
+    return null;
+  }
+
+  return parsed.keyLocations.find((key) => key.path === targetPath) ?? null;
+}
+
 function findTranslationContexts(text) {
   const contexts = [];
   const assignmentRegex =
@@ -322,6 +378,7 @@ function findFiles(root, extensions) {
 function parseJsonWithLocations(text) {
   let index = 0;
   const keys = [];
+  const keyLocations = [];
 
   try {
     parseValue([]);
@@ -331,10 +388,11 @@ function parseJsonWithLocations(text) {
       throw error("Unexpected characters after JSON value.");
     }
 
-    return { keys };
+    return { keys, keyLocations };
   } catch (parseError) {
     return {
       keys,
+      keyLocations,
       error: {
         offset: Math.max(0, Math.min(index, text.length - 1)),
         message: parseError.message,
@@ -385,9 +443,11 @@ function parseJsonWithLocations(text) {
     while (index < text.length) {
       skipWhitespace();
       const key = parseString();
+      const nextPathParts = [...pathParts, key.value];
+      recordKeyLocation(nextPathParts, key);
       skipWhitespace();
       expect(":");
-      parseValue([...pathParts, key.value], key);
+      parseValue(nextPathParts, key);
       skipWhitespace();
 
       if (text[index] === ",") {
@@ -518,6 +578,14 @@ function parseJsonWithLocations(text) {
     });
   }
 
+  function recordKeyLocation(pathParts, keyLocation) {
+    keyLocations.push({
+      path: pathParts.join("."),
+      keyStart: keyLocation.keyStart,
+      keyEnd: keyLocation.keyEnd,
+    });
+  }
+
   function expect(char) {
     if (text[index] !== char) {
       throw error(`Expected '${char}'.`);
@@ -560,8 +628,10 @@ function escapeRegExp(value) {
 module.exports = {
   analyzeJsonDocument,
   analyzeTsxDocument,
+  findJsonKeyLocation,
   findTranslationCalls,
   findTranslationContexts,
+  findTranslationKeyAtOffset,
   inspectDocument,
   isLocaleJsonFile,
   parseJsonWithLocations,
