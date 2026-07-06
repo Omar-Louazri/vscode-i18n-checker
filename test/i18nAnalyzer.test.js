@@ -247,6 +247,110 @@ test("tsx key checks understand assigned hook variables", () => {
   );
 });
 
+test("tsx key checks ignore plain values on generic key properties", () => {
+  const workspaceRoot = createWorkspace({
+    "public/fr/fillpillbox.json": JSON.stringify({ presets: "Horaires" }, null, 2),
+    "public/en/fillpillbox.json": JSON.stringify({ presets: "Presets" }, null, 2),
+  });
+  const text = `
+    const DEFAULT_TIME_PRESETS = [
+      { key: "morning", time: "08:00" },
+      { key: "noon", time: "12:00" },
+      { key: "evening", time: "18:00" },
+      { key: "night", time: "22:00" },
+    ];
+
+    export function FillPillbox() {
+      const { t } = useTranslation("fillpillbox");
+      return <h1>{t("presets")}</h1>;
+    }
+  `;
+
+  const diagnostics = analyzeTsxDocument({
+    text,
+    filePath: path.join(workspaceRoot, "app/fillpillbox.tsx"),
+    workspaceRoot,
+    openDocuments: new Map(),
+    dictionaryPublicPaths: [],
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    [],
+  );
+});
+
+test("tsx key checks keep dotted values on generic key properties", () => {
+  const workspaceRoot = createWorkspace({
+    "public/fr/fillpillbox.json": JSON.stringify(
+      { presets: { noon: "Midi" } },
+      null,
+      2,
+    ),
+    "public/en/fillpillbox.json": JSON.stringify(
+      { presets: { noon: "Noon" } },
+      null,
+      2,
+    ),
+  });
+  const text = `
+    const DEFAULT_TIME_PRESETS = [
+      { key: "presets.morning", time: "08:00" },
+      { key: "presets.noon", time: "12:00" },
+    ];
+
+    export function FillPillbox() {
+      useTranslation("fillpillbox");
+      return null;
+    }
+  `;
+
+  const diagnostics = analyzeTsxDocument({
+    text,
+    filePath: path.join(workspaceRoot, "app/fillpillbox.tsx"),
+    workspaceRoot,
+    openDocuments: new Map(),
+    dictionaryPublicPaths: [],
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    [
+      'Add the attribute "presets.morning" to these JSON files: public/en/fillpillbox.json, public/fr/fillpillbox.json.',
+    ],
+  );
+});
+
+test("tsx key checks keep plain values on specific translation key properties", () => {
+  const workspaceRoot = createWorkspace({
+    "public/fr/common.json": JSON.stringify({}, null, 2),
+    "public/en/common.json": JSON.stringify({}, null, 2),
+  });
+  const text = `
+    const ACTIONS = {
+      save: { labelKey: "save" },
+    };
+
+    export function Actions() {
+      useTranslation("common");
+      return null;
+    }
+  `;
+
+  const diagnostics = analyzeTsxDocument({
+    text,
+    filePath: path.join(workspaceRoot, "app/actions.tsx"),
+    workspaceRoot,
+    openDocuments: new Map(),
+    dictionaryPublicPaths: [],
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    ['Add the attribute "save" to these JSON files: public/en/common.json, public/fr/common.json.'],
+  );
+});
+
 test("tsx key checks expand template keys from indexed const object keys", () => {
   const workspaceRoot = createWorkspace({
     "public/fr/calls.json": JSON.stringify(

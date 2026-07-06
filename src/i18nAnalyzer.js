@@ -645,9 +645,13 @@ function isContextualTranslationKeyLiteral(text, literal, knownKeys) {
   }
 
   const hasKnownKey = knownKeys?.has?.(literal.value);
-  const hasTranslationHint = hasTranslationPropertyHint(text, literal.start);
+  const translationHint = getTranslationPropertyHint(text, literal.start);
 
-  if (hasTranslationHint) {
+  if (translationHint) {
+    if (isGenericTranslationKeyPropertyName(translationHint)) {
+      return literal.value.includes(".");
+    }
+
     return true;
   }
 
@@ -658,30 +662,34 @@ function isTranslationKeyLikeValue(value) {
   return /^[A-Za-z0-9_$-]+(?:\.[A-Za-z0-9_$-]+)*$/.test(value);
 }
 
-function hasTranslationPropertyHint(text, literalStart) {
+function getTranslationPropertyHint(text, literalStart) {
   const previous = findPreviousSignificantToken(text, literalStart);
 
   if (!previous) {
-    return false;
+    return null;
   }
 
   if (previous.value === ":") {
     const propertyName = readPropertyNameBefore(text, previous.start);
-    return isTranslationKeyPropertyName(propertyName);
+    return isTranslationKeyPropertyName(propertyName) ? propertyName : null;
   }
 
   if (previous.value === "=") {
     const attributeName = readIdentifierBefore(text, previous.start);
-    return isTranslationKeyPropertyName(attributeName);
+    return isTranslationKeyPropertyName(attributeName) ? attributeName : null;
   }
 
-  return false;
+  return null;
 }
 
 function isTranslationKeyPropertyName(name) {
   return /(?:^|[_-])(?:i18n|translation|translate|trans|locale|label|title|subtitle|description|message|placeholder|tooltip|ariaLabel)?(?:Key|Path)$/i.test(
     name || "",
   );
+}
+
+function isGenericTranslationKeyPropertyName(name) {
+  return /^(?:key|path)$/i.test(name || "");
 }
 
 function readPropertyNameBefore(text, offset) {
