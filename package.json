@@ -1,14 +1,31 @@
 {
   "name": "simple-i18n-checker",
   "displayName": "Simple i18n Checker",
-  "description": "Underline missing and unused dot-path translation keys for TSX files.",
+  "description": "Keep TSX translation calls and public locale JSON dictionaries in sync with missing-key diagnostics, unused-key cleanup, and definition jumps.",
   "version": "0.0.1",
   "publisher": "local",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#0E7C86",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
   "categories": [
-    "Linters"
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "i18n",
+    "translation",
+    "localization",
+    "l10n",
+    "tsx",
+    "json",
+    "lint",
+    "diagnostics",
+    "quickfix"
   ],
   "activationEvents": [
     "onLanguage:typescriptreact",
@@ -41,11 +58,13 @@
     "commands": [
       {
         "command": "simpleI18nChecker.refresh",
-        "title": "Simple i18n Checker: Refresh Diagnostics"
+        "title": "Refresh i18n Diagnostics",
+        "category": "Simple i18n Checker"
       },
       {
         "command": "simpleI18nChecker.debugActiveFile",
-        "title": "Simple i18n Checker: Debug Active File"
+        "title": "Debug Active i18n File",
+        "category": "Simple i18n Checker"
       }
     ]
   },

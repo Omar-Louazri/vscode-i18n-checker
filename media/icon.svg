@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Simple i18n Checker icon</title>
+  <desc id="desc">A polished extension icon showing translation keys, locale brackets, and a check mark.</desc>
+  <defs>
+    <linearGradient id="bg" x1="38" y1="32" x2="218" y2="224" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0E7C86"/>
+      <stop offset="0.56" stop-color="#155E75"/>
+      <stop offset="1" stop-color="#1F2937"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="62" y1="58" x2="194" y2="198" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DDF7F3"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#06161A" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+  <path d="M63 67c0-13.3 10.7-24 24-24h82c13.3 0 24 10.7 24 24v122c0 13.3-10.7 24-24 24H87c-13.3 0-24-10.7-24-24V67Z" fill="url(#panel)" filter="url(#shadow)"/>
+  <path d="M89 76h78M89 104h78M89 132h52" stroke="#164E63" stroke-width="12" stroke-linecap="round"/>
+  <path d="M90 166h34" stroke="#F59E0B" stroke-width="12" stroke-linecap="round"/>
+  <path d="M70 57h116c-4.2-8.3-12.8-14-22.8-14H92.8c-10 0-18.6 5.7-22.8 14Z" fill="#E0F2FE"/>
+  <path d="M57 100 35 128l22 28M199 100l22 28-22 28" fill="none" stroke="#BFF8EA" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="164" cy="171" r="38" fill="#F59E0B"/>
+  <path d="m146 171 13 13 27-31" fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M92 167c6.4-6.4 6.4-16.8 0-23.2M116 167c-6.4-6.4-6.4-16.8 0-23.2" fill="none" stroke="#164E63" stroke-width="7" stroke-linecap="round"/>
+</svg>

@@ -1,33 +1,41 @@
 # Simple i18n Checker
 
-Simple i18n Checker is a focused VS Code extension for projects that keep
-translation dictionaries under `public/<locale>/<namespace>.json` and read them
-from TSX with `useTranslation(...)` or `useTranslate(...)`.
+![Simple i18n Checker icon](media/icon.svg)
 
-It reports two common i18n maintenance issues:
+Simple i18n Checker is a focused VS Code extension for teams that keep locale
+dictionaries in `public/<locale>/<namespace>.json` and read them from TSX with
+`useTranslation(...)` or `useTranslate(...)`.
 
-- missing translation keys used by TSX files
-- unused leaf keys in locale JSON dictionaries
+It keeps translation usage and JSON dictionaries aligned while you work:
+missing keys are underlined in TSX, unused dictionary leaves are underlined in
+JSON, and cleanup fixes can remove stale keys across every locale file for the
+same namespace.
 
-The extension is intentionally small and regex-based. It is useful for the
-project style described below, not as a general-purpose JavaScript or i18n
-static analyzer.
+## Highlights
 
-## Features
+- Finds missing `t("key.path")` translations in `.tsx` files.
+- Finds unused leaf keys in `public/<locale>/<namespace>.json` dictionaries.
+- Deletes a stale key from every locale dictionary with one Quick Fix.
+- Offers bulk fixes for unused groups such as `hero.*` or an entire namespace.
+- Auto-discovers nested `public` folders, including layouts such as
+  `frontend/public`.
+- Jumps from a TSX translation key to the matching JSON key in the configured
+  default locale.
+- Prints debug details for the active file to the `Simple i18n Checker` output
+  channel.
 
-- Underlines `t("key.path")` calls in `.tsx` files when the key is missing from
-  one or more matching locale dictionaries.
-- Underlines unused leaf keys in `public/<locale>/<namespace>.json` files when
-  no `.tsx` file uses that namespace/key.
-- Offers a Quick Fix for unused JSON keys that deletes the key from every
-  existing locale dictionary for that namespace.
-- Auto-discovers `public` folders anywhere in the workspace, including nested
-  folders such as `frontend/public`.
-- Lets you configure additional dictionary public paths.
-- Supports Go to Definition from a TSX translation key to the matching JSON key
-  in the configured default locale.
-- Provides a debug command that prints detected namespaces, keys, dictionaries,
-  and diagnostic counts to the `Simple i18n Checker` output channel.
+## Designed For
+
+This extension is intentionally small and predictable. It is best for projects
+with:
+
+- TSX components that use string-literal translation namespaces.
+- Dot-path translation keys such as `metadata.title` or `hero.cta`.
+- JSON dictionaries stored directly under locale folders.
+- One JSON file per namespace, for example `public/fr/landing.json`.
+
+It is not a general JavaScript static analyzer. The checker favors transparent
+rules and useful editor feedback over complex inference.
 
 ## Expected Project Layout
 
@@ -43,7 +51,7 @@ public/
     common.json
 ```
 
-Nested `public` directories are also supported:
+Nested `public` directories are supported:
 
 ```text
 frontend/
@@ -113,10 +121,10 @@ path.
 
 ## Diagnostics
 
-### Missing Keys in TSX
+### Missing Keys In TSX
 
 When a TSX file uses a key that is not present in every matching locale
-dictionary, the key is underlined with a warning such as:
+dictionary, the key is underlined with a warning:
 
 ```text
 Add the attribute "hero.title" to these JSON files: public/en/landing.json, public/fr/landing.json.
@@ -125,10 +133,10 @@ Add the attribute "hero.title" to these JSON files: public/en/landing.json, publ
 If the namespace cannot be found in any locale dictionary, the warning points to
 the expected `public/*/<namespace>.json` location.
 
-### Unused Keys in JSON
+### Unused Keys In JSON
 
 When a locale dictionary contains a leaf key that is not used by any `.tsx` file
-with the same namespace, the JSON key is underlined with a warning such as:
+with the same namespace, the JSON key is underlined with a warning:
 
 ```text
 Translation key "hero.subtitle" is not used by any TSX file with namespace "landing".
@@ -151,17 +159,17 @@ Delete all "hero.*" from all landing.json dictionaries
 Delete all unused attributes from all landing.json dictionaries
 ```
 
-Batch fixes are validated before they are offered, so removing final sibling
-keys will also remove the preceding comma instead of leaving trailing commas.
-If every leaf key under a parent object is removed, the parent object is removed
+Batch fixes are validated before they are offered. Removing final sibling keys
+will also remove the preceding comma instead of leaving trailing commas. If
+every leaf key under a parent object is removed, the parent object is removed
 too instead of leaving an empty object behind.
 
 ## Commands
 
 Open the command palette and run:
 
-- `Simple i18n Checker: Refresh Diagnostics`
-- `Simple i18n Checker: Debug Active File`
+- `Simple i18n Checker: Refresh i18n Diagnostics`
+- `Simple i18n Checker: Debug Active i18n File`
 
 The debug command writes inspection details to the `Simple i18n Checker` output
 channel. It is the fastest way to check which namespace, translation calls, and
@@ -175,8 +183,6 @@ Default: `fr`
 
 Locale used by Go to Definition when jumping from a TSX key to a JSON
 dictionary.
-
-Example:
 
 ```json
 {
@@ -192,8 +198,6 @@ Optional `public` directory paths to scan for locale dictionaries. Paths may be
 relative to the workspace root or absolute. Auto-discovery still runs, so this
 setting is mainly useful when you want to make a specific dictionary location
 explicit.
-
-Example:
 
 ```json
 {
@@ -248,8 +252,7 @@ The tests exercise the core analyzer without launching VS Code.
 
 ## Package
 
-If `vsce` is installed through the project dependencies, build a local `.vsix`
-package with:
+Build a local `.vsix` package with:
 
 ```sh
 npx vsce package
