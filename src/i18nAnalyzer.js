@@ -76,8 +76,15 @@ function analyzeTsxDocument({ text, filePath, workspaceRoot, openDocuments, dict
     const namespaceTarget = existingDictionaries.length
       ? existingDictionaries.map((file) => path.relative(workspaceRoot, file.filePath)).join(", ")
       : getNamespaceTarget(workspaceRoot, context.namespace, dictionaryPublicPaths, cache);
+    const checkedKeys = new Set();
 
-    for (const usage of findTranslationCallsForContext(text, context)) {
+    for (const usage of findTranslationUsagesForContext(text, context)) {
+      if (checkedKeys.has(usage.key)) {
+        continue;
+      }
+
+      checkedKeys.add(usage.key);
+
       if (!existingDictionaries.length) {
         diagnostics.push({
           start: usage.keyStart,
@@ -133,7 +140,13 @@ function analyzeJsonDocument({ text, filePath, workspaceRoot, openDocuments, dic
     ];
   }
 
-  const usedKeys = findWorkspaceTranslationKeys(workspaceRoot, info.namespace, openDocuments, cache);
+  const usedKeys = findWorkspaceTranslationKeys(
+    workspaceRoot,
+    info.namespace,
+    openDocuments,
+    dictionaryPublicPaths,
+    cache,
+  );
 
   return parsed.keys
     .filter((key) => !usedKeys.has(key.path))
@@ -167,7 +180,7 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments, diction
           filePath: path.relative(workspaceRoot, file.filePath),
           keyCount: file.keys.size,
         })),
-        usages: findTranslationCallsForContext(text, context).map((usage) => usage.key),
+        usages: findTranslationUsagesForContext(text, context).map((usage) => usage.key),
       })),
     };
   }
@@ -185,7 +198,9 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments, diction
       keyCount: parsed.keys.length,
       keys: parsed.keys.map((key) => key.path),
       parseError: parsed.error?.message ?? null,
-      usedKeys: info ? [...findWorkspaceTranslationKeys(workspaceRoot, info.namespace, openDocuments, cache)].sort() : [],
+      usedKeys: info
+        ? [...findWorkspaceTranslationKeys(workspaceRoot, info.namespace, openDocuments, dictionaryPublicPaths, cache)].sort()
+        : [],
     };
   }
 
@@ -197,7 +212,7 @@ function inspectDocument({ text, filePath, workspaceRoot, openDocuments, diction
 
 function findTranslationKeyAtOffset(text, offset) {
   for (const context of findTranslationContexts(text)) {
-    for (const usage of findTranslationCallsForContext(text, context)) {
+    for (const usage of findTranslationUsagesForContext(text, context)) {
       const segment = findKeySegmentAtOffset(usage, offset);
 
       if (segment) {
@@ -571,6 +586,31 @@ function findTranslationCallsForContext(text, context) {
   return usages.sort((left, right) => left.keyStart - right.keyStart);
 }
 
+function findTranslationUsagesForContext(text, context, knownKeys = null) {
+  return dedupeTranslationUsages([
+    ...findTranslationCallsForContext(text, context),
+    ...findContextualTranslationKeyLiterals(text, knownKeys),
+  ]);
+}
+
+function dedupeTranslationUsages(usages) {
+  const seen = new Set();
+  const result = [];
+
+  for (const usage of usages.sort((left, right) => left.keyStart - right.keyStart)) {
+    const key = `${usage.key}\0${usage.keyStart}\0${usage.keyEnd}`;
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push(usage);
+  }
+
+  return result;
+}
+
 function findMemberTranslationCalls(text, objectName, methodName) {
   const escapedObjectName = escapeRegExp(objectName);
   const escapedMethodName = escapeRegExp(methodName);
@@ -586,6 +626,177 @@ function findMemberTranslationCalls(text, objectName, methodName) {
   }
 
   return usages;
+}
+
+function findContextualTranslationKeyLiterals(text, knownKeys = null) {
+  return findStringLiterals(text)
+    .filter((literal) => isContextualTranslationKeyLiteral(text, literal, knownKeys))
+    .map((literal) => ({
+      key: literal.value,
+      keyStart: literal.valueStart,
+      keyEnd: literal.valueEnd,
+      isDynamic: false,
+    }));
+}
+
+function isContextualTranslationKeyLiteral(text, literal, knownKeys) {
+  if (!literal.value || !isTranslationKeyLikeValue(literal.value)) {
+    return false;
+  }
+
+  const hasKnownKey = knownKeys?.has?.(literal.value);
+  const hasTranslationHint = hasTranslationPropertyHint(text, literal.start);
+
+  if (hasTranslationHint) {
+    return true;
+  }
+
+  return literal.value.includes(".") && (!knownKeys || hasKnownKey);
+}
+
+function isTranslationKeyLikeValue(value) {
+  return /^[A-Za-z0-9_$-]+(?:\.[A-Za-z0-9_$-]+)*$/.test(value);
+}
+
+function hasTranslationPropertyHint(text, literalStart) {
+  const previous = findPreviousSignificantToken(text, literalStart);
+
+  if (!previous) {
+    return false;
+  }
+
+  if (previous.value === ":") {
+    const propertyName = readPropertyNameBefore(text, previous.start);
+    return isTranslationKeyPropertyName(propertyName);
+  }
+
+  if (previous.value === "=") {
+    const attributeName = readIdentifierBefore(text, previous.start);
+    return isTranslationKeyPropertyName(attributeName);
+  }
+
+  return false;
+}
+
+function isTranslationKeyPropertyName(name) {
+  return /(?:^|[_-])(?:i18n|translation|translate|trans|locale|label|title|subtitle|description|message|placeholder|tooltip|ariaLabel)?(?:Key|Path)$/i.test(
+    name || "",
+  );
+}
+
+function readPropertyNameBefore(text, offset) {
+  let index = skipWhitespaceBackward(text, offset - 1);
+  const quote = text[index];
+
+  if (quote === "\"" || quote === "'") {
+    const end = index;
+    index -= 1;
+
+    while (index >= 0) {
+      if (text[index] === "\\") {
+        index -= 2;
+        continue;
+      }
+
+      if (text[index] === quote) {
+        return text.slice(index + 1, end);
+      }
+
+      index -= 1;
+    }
+
+    return "";
+  }
+
+  return readIdentifierBefore(text, index + 1);
+}
+
+function readIdentifierBefore(text, offset) {
+  let index = skipWhitespaceBackward(text, offset - 1);
+  const end = index + 1;
+
+  while (index >= 0 && /[A-Za-z0-9_$-]/.test(text[index] || "")) {
+    index -= 1;
+  }
+
+  return text.slice(index + 1, end);
+}
+
+function findPreviousSignificantToken(text, offset) {
+  let index = skipWhitespaceBackward(text, offset - 1);
+
+  while (index >= 0) {
+    if (isLineCommentEnd(text, index)) {
+      index = findLineCommentStartBefore(text, index - 1);
+      index = skipWhitespaceBackward(text, index - 1);
+      continue;
+    }
+
+    if (isBlockCommentEnd(text, index)) {
+      index = findBlockCommentStartBefore(text, index - 1);
+      index = skipWhitespaceBackward(text, index - 1);
+      continue;
+    }
+
+    return { value: text[index], start: index };
+  }
+
+  return null;
+}
+
+function findStringLiterals(text) {
+  const literals = [];
+  let index = 0;
+
+  while (index < text.length) {
+    if (isLineCommentStart(text, index)) {
+      index = findLineCommentEnd(text, index + 2);
+      continue;
+    }
+
+    if (isBlockCommentStart(text, index)) {
+      index = findBlockCommentEnd(text, index + 2);
+      continue;
+    }
+
+    const char = text[index];
+
+    if (char === "\"" || char === "'") {
+      const parsed = parseQuotedString(text, index, char);
+
+      if (parsed) {
+        literals.push({
+          value: parsed.value,
+          start: index,
+          valueStart: parsed.valueStart,
+          valueEnd: parsed.valueEnd,
+          end: parsed.valueEnd + 1,
+        });
+        index = parsed.valueEnd + 1;
+        continue;
+      }
+    }
+
+    if (char === "`") {
+      const parsed = parseTemplateLiteral(text, index);
+
+      if (parsed && !parsed.expressions.length) {
+        literals.push({
+          value: parsed.parts[0],
+          start: index,
+          valueStart: parsed.contentStart,
+          valueEnd: parsed.contentEnd,
+          end: parsed.contentEnd + 1,
+        });
+        index = parsed.contentEnd + 1;
+        continue;
+      }
+    }
+
+    index += 1;
+  }
+
+  return literals;
 }
 
 function parseTranslationKeyArgument(text, offset, dynamicValues) {
@@ -609,7 +820,24 @@ function parseTranslationKeyArgument(text, offset, dynamicValues) {
   }
 
   if (quote !== "`") {
-    return [];
+    const parsedExpression = parseCallArgumentExpression(text, keyStart);
+
+    if (!parsedExpression) {
+      return [];
+    }
+
+    const values = dynamicValues.get(normalizeExpression(parsedExpression.source));
+
+    if (!values?.length) {
+      return [];
+    }
+
+    return values.map((key) => ({
+      key,
+      keyStart,
+      keyEnd: parsedExpression.end,
+      isDynamic: true,
+    }));
   }
 
   const parsedTemplate = parseTemplateLiteral(text, keyStart);
@@ -646,6 +874,73 @@ function parseTranslationKeyArgument(text, offset, dynamicValues) {
     keyEnd: parsedTemplate.contentEnd,
     isDynamic: true,
   }));
+}
+
+function parseCallArgumentExpression(text, start) {
+  let index = start;
+  let depth = 0;
+  let quote = null;
+
+  while (index < text.length) {
+    const char = text[index];
+
+    if (quote) {
+      if (char === "\\") {
+        index += 2;
+        continue;
+      }
+
+      if (char === quote) {
+        quote = null;
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (isLineCommentStart(text, index)) {
+      index = findLineCommentEnd(text, index + 2);
+      continue;
+    }
+
+    if (isBlockCommentStart(text, index)) {
+      index = findBlockCommentEnd(text, index + 2);
+      continue;
+    }
+
+    if (char === "\"" || char === "'" || char === "`") {
+      quote = char;
+      index += 1;
+      continue;
+    }
+
+    if (char === "(" || char === "[" || char === "{") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (char === ")" || char === "]" || char === "}") {
+      if (depth === 0) {
+        break;
+      }
+
+      depth -= 1;
+      index += 1;
+      continue;
+    }
+
+    if (char === "," && depth === 0) {
+      break;
+    }
+
+    index += 1;
+  }
+
+  const end = trimTrailingWhitespaceEnd(text, start, index);
+  const source = text.slice(start, end);
+
+  return source.trim() ? { source, end } : null;
 }
 
 function parseQuotedString(text, start, quote) {
@@ -753,6 +1048,16 @@ function parseTemplateExpression(text, start) {
       continue;
     }
 
+    if (isLineCommentStart(text, index)) {
+      index = findLineCommentEnd(text, index + 2);
+      continue;
+    }
+
+    if (isBlockCommentStart(text, index)) {
+      index = findBlockCommentEnd(text, index + 2);
+      continue;
+    }
+
     if (char === "\"" || char === "'") {
       quote = char;
       index += 1;
@@ -808,14 +1113,35 @@ function combineTemplateValues(parts, expressionValues) {
 }
 
 function findDynamicExpressionValues(text) {
-  const objectKeys = findConstObjectKeySets(text);
+  const objects = findConstObjectData(text);
   const expressionValues = new Map();
 
-  for (const [objectName, keys] of objectKeys) {
+  for (const [objectName, objectData] of objects) {
     const accessRegex = new RegExp(`(?<![\\w$])${escapeRegExp(objectName)}\\s*\\[([^\\]]+)\\]`, "g");
 
     for (const match of text.matchAll(accessRegex)) {
-      addExpressionValues(expressionValues, normalizeExpression(match[1]), keys);
+      addExpressionValues(expressionValues, normalizeExpression(match[1]), objectData.keys);
+    }
+
+    for (const [propertyName, values] of objectData.stringPropertyValues) {
+      const escapedPropertyName = escapeRegExp(propertyName);
+      const directAccessRegex = new RegExp(
+        `(?<![\\w$])${escapeRegExp(objectName)}\\s*\\[[^\\]]+\\]\\s*\\.\\s*${escapedPropertyName}`,
+        "g",
+      );
+
+      for (const match of text.matchAll(directAccessRegex)) {
+        addExpressionValues(expressionValues, normalizeExpression(match[0]), values);
+      }
+
+      const aliasRegex = new RegExp(
+        `\\bconst\\s+([A-Za-z_$][\\w$]*)\\b(?:\\s*:[^=]+)?\\s*=\\s*${escapeRegExp(objectName)}\\s*\\[[^\\]]+\\]`,
+        "g",
+      );
+
+      for (const match of text.matchAll(aliasRegex)) {
+        addExpressionValues(expressionValues, `${match[1]}.${propertyName}`, values);
+      }
     }
   }
 
@@ -823,6 +1149,12 @@ function findDynamicExpressionValues(text) {
 }
 
 function findConstObjectKeySets(text) {
+  const objects = findConstObjectData(text);
+
+  return new Map([...objects].map(([objectName, objectData]) => [objectName, objectData.keys]));
+}
+
+function findConstObjectData(text) {
   const objects = new Map();
   const constRegex = /\bconst\s+([A-Za-z_$][\w$]*)\b[^=]*=\s*\{/g;
 
@@ -834,10 +1166,12 @@ function findConstObjectKeySets(text) {
       continue;
     }
 
-    const keys = parseTopLevelObjectKeys(text.slice(objectStart + 1, objectEnd));
+    const source = text.slice(objectStart + 1, objectEnd);
+    const keys = parseTopLevelObjectKeys(source);
+    const stringPropertyValues = parseNestedStringPropertyValues(source);
 
-    if (keys.length) {
-      objects.set(match[1], keys);
+    if (keys.length || stringPropertyValues.size) {
+      objects.set(match[1], { keys, stringPropertyValues });
     }
   }
 
@@ -845,7 +1179,11 @@ function findConstObjectKeySets(text) {
 }
 
 function parseTopLevelObjectKeys(source) {
-  const keys = [];
+  return parseTopLevelObjectProperties(source).map((property) => property.key);
+}
+
+function parseTopLevelObjectProperties(source) {
+  const properties = [];
   let index = 0;
 
   while (index < source.length) {
@@ -868,12 +1206,24 @@ function parseTopLevelObjectKeys(source) {
       continue;
     }
 
-    keys.push(key.value);
     index += 1;
+    const valueStart = skipWhitespaceAt(source, index);
+    index = valueStart;
     let depth = 0;
+    let valueEnd = source.length;
 
     while (index < source.length) {
       const char = source[index];
+
+      if (isLineCommentStart(source, index)) {
+        index = findLineCommentEnd(source, index + 2);
+        continue;
+      }
+
+      if (isBlockCommentStart(source, index)) {
+        index = findBlockCommentEnd(source, index + 2);
+        continue;
+      }
 
       if (char === "\"" || char === "'" || char === "`") {
         const end = findStringEnd(source, index, char);
@@ -886,15 +1236,69 @@ function parseTopLevelObjectKeys(source) {
       } else if (char === "}" || char === "]" || char === ")") {
         depth = Math.max(0, depth - 1);
       } else if (char === "," && depth === 0) {
+        valueEnd = index;
         index += 1;
         break;
       }
 
       index += 1;
     }
+
+    properties.push({
+      key: key.value,
+      valueStart,
+      valueEnd: trimTrailingWhitespaceEnd(source, valueStart, valueEnd),
+    });
   }
 
-  return keys;
+  return properties;
+}
+
+function parseNestedStringPropertyValues(source) {
+  const propertyValues = new Map();
+
+  for (const property of parseTopLevelObjectProperties(source)) {
+    if (source[property.valueStart] !== "{") {
+      continue;
+    }
+
+    const objectEnd = findMatchingBrace(source, property.valueStart);
+
+    if (objectEnd === -1 || objectEnd > property.valueEnd) {
+      continue;
+    }
+
+    for (const nestedProperty of parseDirectStringProperties(
+      source.slice(property.valueStart + 1, objectEnd),
+    )) {
+      const existing = propertyValues.get(nestedProperty.key) ?? [];
+      propertyValues.set(nestedProperty.key, [...new Set([...existing, nestedProperty.value])]);
+    }
+  }
+
+  return propertyValues;
+}
+
+function parseDirectStringProperties(source) {
+  const stringProperties = [];
+
+  for (const property of parseTopLevelObjectProperties(source)) {
+    const quote = source[property.valueStart];
+
+    if (quote !== "\"" && quote !== "'") {
+      continue;
+    }
+
+    const parsed = parseQuotedString(source, property.valueStart, quote);
+
+    if (!parsed || parsed.valueEnd + 1 > property.valueEnd) {
+      continue;
+    }
+
+    stringProperties.push({ key: property.key, value: parsed.value });
+  }
+
+  return stringProperties;
 }
 
 function parseObjectPropertyKey(source, start) {
@@ -960,6 +1364,16 @@ function findMatchingBrace(text, start) {
       continue;
     }
 
+    if (isLineCommentStart(text, index)) {
+      index = findLineCommentEnd(text, index + 2);
+      continue;
+    }
+
+    if (isBlockCommentStart(text, index)) {
+      index = findBlockCommentEnd(text, index + 2);
+      continue;
+    }
+
     if (char === "{") {
       depth += 1;
     } else if (char === "}") {
@@ -998,8 +1412,23 @@ function findStringEnd(text, start, quote) {
 function skipWhitespaceAt(text, offset) {
   let index = offset;
 
-  while (/\s/.test(text[index] || "")) {
-    index += 1;
+  while (index < text.length) {
+    if (/\s/.test(text[index] || "")) {
+      index += 1;
+      continue;
+    }
+
+    if (isLineCommentStart(text, index)) {
+      index = findLineCommentEnd(text, index + 2);
+      continue;
+    }
+
+    if (isBlockCommentStart(text, index)) {
+      index = findBlockCommentEnd(text, index + 2);
+      continue;
+    }
+
+    break;
   }
 
   return index;
@@ -1008,8 +1437,81 @@ function skipWhitespaceAt(text, offset) {
 function skipWhitespaceAndCommasAt(text, offset) {
   let index = offset;
 
-  while (/[\s,]/.test(text[index] || "")) {
-    index += 1;
+  while (index < text.length) {
+    if (/[\s,]/.test(text[index] || "")) {
+      index += 1;
+      continue;
+    }
+
+    if (isLineCommentStart(text, index)) {
+      index = findLineCommentEnd(text, index + 2);
+      continue;
+    }
+
+    if (isBlockCommentStart(text, index)) {
+      index = findBlockCommentEnd(text, index + 2);
+      continue;
+    }
+
+    break;
+  }
+
+  return index;
+}
+
+function skipWhitespaceBackward(text, offset) {
+  let index = offset;
+
+  while (index >= 0 && /\s/.test(text[index] || "")) {
+    index -= 1;
+  }
+
+  return index;
+}
+
+function isLineCommentStart(text, index) {
+  return text[index] === "/" && text[index + 1] === "/";
+}
+
+function isBlockCommentStart(text, index) {
+  return text[index] === "/" && text[index + 1] === "*";
+}
+
+function isLineCommentEnd(text, index) {
+  return text[index] === "\n";
+}
+
+function isBlockCommentEnd(text, index) {
+  return text[index - 1] === "*" && text[index] === "/";
+}
+
+function findLineCommentEnd(text, offset) {
+  const end = text.indexOf("\n", offset);
+  return end === -1 ? text.length : end + 1;
+}
+
+function findBlockCommentEnd(text, offset) {
+  const end = text.indexOf("*/", offset);
+  return end === -1 ? text.length : end + 2;
+}
+
+function findLineCommentStartBefore(text, offset) {
+  const lineStart = text.lastIndexOf("\n", offset) + 1;
+  const commentStart = text.lastIndexOf("//", offset);
+
+  return commentStart >= lineStart ? commentStart : lineStart;
+}
+
+function findBlockCommentStartBefore(text, offset) {
+  const commentStart = text.lastIndexOf("/*", offset);
+  return commentStart === -1 ? 0 : commentStart;
+}
+
+function trimTrailingWhitespaceEnd(text, start, end) {
+  let index = Math.max(start, end);
+
+  while (index > start && /\s/.test(text[index - 1] || "")) {
+    index -= 1;
   }
 
   return index;
@@ -1244,7 +1746,7 @@ function isRelativeChildPath(relativePath) {
   return relativePath !== "" && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
 }
 
-function findWorkspaceTranslationKeys(workspaceRoot, namespace, openDocuments, cache) {
+function findWorkspaceTranslationKeys(workspaceRoot, namespace, openDocuments, dictionaryPublicPaths, cache) {
   const cacheKey = `${workspaceRoot}\0${namespace}`;
   const workspaceTranslationKeysCache = getCacheMap(cache, "workspaceTranslationKeys");
   const cachedKeys = workspaceTranslationKeysCache?.get(cacheKey);
@@ -1254,7 +1756,18 @@ function findWorkspaceTranslationKeys(workspaceRoot, namespace, openDocuments, c
   }
 
   const keys = new Set();
+  const knownKeys = new Set();
   const filePaths = new Set(findFiles(workspaceRoot, TSX_EXTENSIONS, cache));
+
+  for (const dictionary of readDictionaries(workspaceRoot, namespace, openDocuments, dictionaryPublicPaths, cache).files) {
+    if (!dictionary.exists) {
+      continue;
+    }
+
+    for (const key of dictionary.keys) {
+      knownKeys.add(key);
+    }
+  }
 
   for (const filePath of openDocuments?.keys?.() ?? []) {
     if (isInsidePath(workspaceRoot, filePath) && TSX_EXTENSIONS.has(path.extname(filePath))) {
@@ -1270,7 +1783,7 @@ function findWorkspaceTranslationKeys(workspaceRoot, namespace, openDocuments, c
         continue;
       }
 
-      for (const usage of findTranslationCallsForContext(text, context)) {
+      for (const usage of findTranslationUsagesForContext(text, context, knownKeys)) {
         keys.add(usage.key);
       }
     }

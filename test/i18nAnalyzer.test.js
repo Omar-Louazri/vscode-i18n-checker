@@ -341,6 +341,216 @@ test("json key checks count expanded template keys as used", () => {
   );
 });
 
+test("tsx key checks resolve label keys from indexed config object aliases", () => {
+  const workspaceRoot = createWorkspace({
+    "public/fr/patients.json": JSON.stringify(
+      {
+        relatives_section: {
+          invite_status: {
+            accepted: "Accepte",
+            pending: "En attente",
+            none: "Aucune invitation",
+          },
+        },
+      },
+      null,
+      2,
+    ),
+  });
+  const text = `
+    type InviteStatus = "accepted" | "pending" | "declined" | "none";
+
+    const INVITE_STATUS_CONFIG: Record<InviteStatus, { className: string; labelKey: string }> = {
+      accepted: {
+        className: "bg-green-100",
+        labelKey: "relatives_section.invite_status.accepted",
+      },
+      pending: {
+        className: "bg-amber-100",
+        labelKey: "relatives_section.invite_status.pending",
+      },
+      declined: {
+        className: "bg-red-100",
+        labelKey: "relatives_section.invite_status.declined",
+      },
+      none: {
+        className: "bg-gray-100",
+        labelKey: "relatives_section.invite_status.none",
+      },
+    };
+
+    export function InviteStatusPill({ status }) {
+      const { t } = useTranslation("patients");
+      const cfg = INVITE_STATUS_CONFIG[status ?? "none"];
+      return <span>{t(cfg.labelKey, cfg.labelKey)}</span>;
+    }
+  `;
+
+  const diagnostics = analyzeTsxDocument({
+    text,
+    filePath: path.join(workspaceRoot, "app/patients.tsx"),
+    workspaceRoot,
+    openDocuments: new Map(),
+    dictionaryPublicPaths: [],
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    ['Add the attribute "relatives_section.invite_status.declined" to public/fr/patients.json.'],
+  );
+});
+
+test("json key checks count label keys from indexed config object aliases as used", () => {
+  const workspaceRoot = createWorkspace({
+    "public/fr/patients.json": JSON.stringify(
+      {
+        relatives_section: {
+          invite_status: {
+            accepted: "Accepte",
+            pending: "En attente",
+            declined: "Refuse",
+            none: "Aucune invitation",
+            invited: "Invite",
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    "app/patients.tsx": `
+      type InviteStatus = "accepted" | "pending" | "declined" | "none";
+
+      const INVITE_STATUS_CONFIG: Record<InviteStatus, { className: string; labelKey: string }> = {
+        accepted: {
+          className: "bg-green-100",
+          labelKey: "relatives_section.invite_status.accepted",
+        },
+        pending: {
+          className: "bg-amber-100",
+          labelKey: "relatives_section.invite_status.pending",
+        },
+        declined: {
+          className: "bg-red-100",
+          labelKey: "relatives_section.invite_status.declined",
+        },
+        none: {
+          className: "bg-gray-100",
+          labelKey: "relatives_section.invite_status.none",
+        },
+      };
+
+      export function InviteStatusPill({ status }) {
+        const { t } = useTranslation("patients");
+        const cfg = INVITE_STATUS_CONFIG[status ?? "none"];
+        return <span>{t(cfg.labelKey, cfg.labelKey)}</span>;
+      }
+    `,
+  });
+  const filePath = path.join(workspaceRoot, "public/fr/patients.json");
+  const diagnostics = analyzeJsonDocument({
+    text: fs.readFileSync(filePath, "utf8"),
+    filePath,
+    workspaceRoot,
+    openDocuments: new Map(),
+    dictionaryPublicPaths: [],
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    [
+      'Translation key "relatives_section.invite_status.invited" is not used by any TSX file with namespace "patients".',
+    ],
+  );
+});
+
+test("json key checks read translation keys from commented config maps", () => {
+  const workspaceRoot = createWorkspace({
+    "public/fr/patients.json": JSON.stringify(
+      {
+        relatives_section: {
+          invite_status: {
+            accepted: "Accepte",
+            pending: "En attente",
+            declined: "Refuse",
+            none: "Aucune invitation",
+            invited: "Invite",
+            archived: "Archive",
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    "app/patients.tsx": `
+      type InviteStatus = PatientRelative["invite_status"];
+
+      const INVITE_STATUS_CONFIG: Record<
+        InviteStatus,
+        { icon: React.ElementType; className: string; labelKey: string }
+      > = {
+        // Relative accepted - linked_patient is an active Patient account.
+        // FUTURE: make the pill clickable to navigate to the patient's profile page.
+        accepted: {
+          icon: UserCheck,
+          className: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 border-green-200",
+          labelKey: "relatives_section.invite_status.accepted",
+        },
+        // Invite email sent but no response yet.
+        // FUTURE: add a "Resend" button next to this pill.
+        pending: {
+          icon: Clock,
+          className: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 border-amber-200",
+          labelKey: "relatives_section.invite_status.pending",
+        },
+        // Relative explicitly declined the invite.
+        declined: {
+          icon: UserX,
+          className: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 border-red-200",
+          labelKey: "relatives_section.invite_status.declined",
+        },
+        // No invite was ever sent; if status is 'none', show a "Send invite" button.
+        none: {
+          icon: UserMinus,
+          className: "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 border-gray-200",
+          labelKey: "relatives_section.invite_status.none",
+        },
+        invited: {
+          icon: Clock,
+          className: "bg-sky-100 text-sky-700",
+          labelKey: "relatives_section.invite_status.invited",
+        },
+      };
+
+      export const InviteStatusPill = ({ status }: { status: InviteStatus | undefined }) => {
+        const { t } = useTranslation("patients");
+        const cfg = INVITE_STATUS_CONFIG[status ?? "none"];
+        const Icon = cfg.icon;
+        return (
+          <span className={\`inline-flex items-center \${cfg.className}\`}>
+            <Icon className="h-3 w-3" />
+            {t(cfg.labelKey, cfg.labelKey)}
+          </span>
+        );
+      };
+    `,
+  });
+  const filePath = path.join(workspaceRoot, "public/fr/patients.json");
+  const diagnostics = analyzeJsonDocument({
+    text: fs.readFileSync(filePath, "utf8"),
+    filePath,
+    workspaceRoot,
+    openDocuments: new Map(),
+    dictionaryPublicPaths: [],
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    [
+      'Translation key "relatives_section.invite_status.archived" is not used by any TSX file with namespace "patients".',
+    ],
+  );
+});
+
 function createWorkspace(files) {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "simple-i18n-checker-"));
 

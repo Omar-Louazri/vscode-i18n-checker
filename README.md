@@ -267,7 +267,9 @@ code --install-extension simple-i18n-checker-0.0.1.vsix
 - Namespace arguments must be string literals.
 - Translation keys must be string literals, except for template literals whose
   expressions can be inferred from same-file const object keys used through
-  indexed access such as `STATUS_CLASSES[call.status]`.
+  indexed access such as `STATUS_CLASSES[call.status]`, or same-file const
+  config object string properties used through an indexed alias such as
+  `const cfg = INVITE_STATUS_CONFIG[status ?? "none"]; t(cfg.labelKey)`.
 - Variables, imported constants, arbitrary template expressions, and computed
   keys are not evaluated.
 - The checker does not understand arbitrary aliases or wrapper functions beyond
